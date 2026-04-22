@@ -287,25 +287,23 @@ pub fn write_pdf(threads: &[ConversationThread], output_path: &Path, show_detail
 
 /// Write one PDF file per conversation thread.
 /// Files are named `<stem>-00001.pdf`, `<stem>-00002.pdf`, etc., written into
-/// the same directory as `output_path`. Each PDF contains only the messages for
-/// that thread (no bold "Thread:" header block).
+/// `output_dir`. Each PDF contains only the messages for that thread (no bold
+/// "Thread:" header block).
 pub fn write_conversation_pdfs(
     threads: &[ConversationThread],
-    output_path: &Path,
+    output_dir: &Path,
+    stem: &str,
     show_details: bool,
 ) -> Result<()> {
-    let stem = output_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("pst2pdf");
-    let parent = output_path.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
 
     let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
     let bold_font = PdfFontHandle::Builtin(BuiltinFont::HelveticaBold);
 
     for (i, thread) in threads.iter().enumerate() {
         let filename = format!("{}-{:05}.pdf", stem, i + 1);
-        let path = parent.join(&filename);
+        let path = output_dir.join(&filename);
 
         let mut writer = PageWriter::new(&thread.display_subject);
         render_messages_to_writer(&mut writer, &thread.messages, &normal_font, &bold_font, show_details);

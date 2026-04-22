@@ -17,8 +17,10 @@ struct Args {
     #[arg(long, value_name = "FILE")]
     pst: PathBuf,
 
-    /// Output PDF file path (defaults to <pst-name>.pdf)
-    #[arg(long, value_name = "FILE")]
+    /// Output PDF file or folder.
+    /// If a folder, the PST filename is used as the PDF name inside it.
+    /// With --conversations this must be a folder; numbered PDFs are written there.
+    #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
 
     /// Show internal Exchange addresses (e.g. /O=.../CN=...) in From/To fields
@@ -38,11 +40,19 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let output_path = args.output.unwrap_or_else(|| {
-        let mut p = args.pst.clone();
-        p.set_extension("pdf");
-        p
-    });
+    // Derive the stem (base filename without extension) from the PST file.
+    let pst_stem = args.pst
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("output")
+        .to_string();
+
+    // Default output directory is the PST file's own directory.
+    let pst_dir = args.pst
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
 
     println!("Reading PST: {}", args.pst.display());
     let messages = pst_reader::read_messages(&args.pst)
@@ -53,25 +63,30 @@ fn main() -> Result<()> {
     println!("Grouped into {} conversation threads", threads.len());
 
     if args.conversations {
-        let stem = output_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("pst2pdf")
-            .to_string();
-        let parent = output_path.parent().unwrap_or(std::path::Path::new("."));
-        if let Some(p) = parent.to_str().filter(|s| !s.is_empty()) {
-            println!("Writing {} conversation PDFs to: {}", threads.len(), p);
-        }
-        pdf_writer::write_conversation_pdfs(&threads, &output_path, args.showdetails)
-            .with_context(|| format!("Failed to write conversation PDFs"))?;
+        // --conversations: --output is always a directory.
+        let output_dir = args.output.clone().unwrap_or_else(|| pst_dir.clone());
+
+        println!("Writing {} conversation PDFs to: {}", threads.len(), output_dir.display());
+        pdf_writer::write_conversation_pdfs(&threads, &output_dir, &pst_stem, args.showdetails)
+            .with_context(|| format!("Failed to write conversation PDFs to {}", output_dir.display()))?;
 
         if let Some(att_dir) = &args.attachments {
             println!("Extracting attachments to: {}", att_dir.display());
-            let count = pst_reader::save_attachments_for_threads(&args.pst, att_dir, &threads, &stem)
+            let count = pst_reader::save_attachments_for_threads(&args.pst, att_dir, &threads, &pst_stem)
                 .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
             println!("Saved {} attachment(s).", count);
         }
     } else {
+        // Normal mode: resolve --output as a file or folder.
+        let output_path = match args.output {
+            // Existing directory → place <pst_stem>.pdf inside it
+            Some(ref p) if p.is_dir() => p.join(format!("{}.pdf", pst_stem)),
+            // Explicit file path (or not-yet-existing path) → use as-is
+            Some(p) => p,
+            // No --output → same directory as the PST file
+            None => pst_dir.join(format!("{}.pdf", pst_stem)),
+        };
+
         println!("Writing PDF: {}", output_path.display());
         pdf_writer::write_pdf(&threads, &output_path, args.showdetails)
             .with_context(|| format!("Failed to write {}", output_path.display()))?;
