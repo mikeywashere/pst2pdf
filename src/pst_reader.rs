@@ -543,3 +543,106 @@ fn unique_filename(name: &str, used_names: &mut HashSet<String>) -> String {
         counter += 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_html ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn strip_html_removes_tags() {
+        assert_eq!(strip_html("<p>Hello</p>"), "Hello");
+    }
+
+    #[test]
+    fn strip_html_plain_text_unchanged() {
+        assert_eq!(strip_html("Hello World"), "Hello World");
+    }
+
+    #[test]
+    fn strip_html_decodes_entities() {
+        assert_eq!(strip_html("&amp;&lt;&gt;&nbsp;&quot;&#39;"), "&<> \"'");
+    }
+
+    #[test]
+    fn strip_html_nested_tags() {
+        assert_eq!(strip_html("<div><b>bold</b> text</div>"), "bold text");
+    }
+
+    #[test]
+    fn strip_html_empty_string() {
+        assert_eq!(strip_html(""), "");
+    }
+
+    #[test]
+    fn strip_html_only_tags() {
+        assert_eq!(strip_html("<br/><hr/>"), "");
+    }
+
+    // ── filetime_to_datetime ─────────────────────────────────────────────────
+
+    #[test]
+    fn filetime_unix_epoch() {
+        // FILETIME for 1970-01-01 00:00:00 UTC = 116444736000000000
+        let dt = filetime_to_datetime(116_444_736_000_000_000).unwrap();
+        assert_eq!(dt.timestamp(), 0);
+    }
+
+    #[test]
+    fn filetime_y2k() {
+        // 2000-01-01 00:00:00 UTC: unix ts = 946684800
+        // FILETIME = (946684800 + 11644473600) * 10_000_000
+        let ft = (946_684_800i64 + 11_644_473_600) * 10_000_000;
+        let dt = filetime_to_datetime(ft).unwrap();
+        assert_eq!(dt.timestamp(), 946_684_800);
+    }
+
+    // ── unique_filename ──────────────────────────────────────────────────────
+
+    #[test]
+    fn unique_filename_new_name() {
+        let mut used = HashSet::new();
+        assert_eq!(unique_filename("photo.jpg", &mut used), "photo.jpg");
+    }
+
+    #[test]
+    fn unique_filename_duplicate_adds_counter() {
+        let mut used = HashSet::new();
+        unique_filename("photo.jpg", &mut used);
+        assert_eq!(unique_filename("photo.jpg", &mut used), "photo_1.jpg");
+    }
+
+    #[test]
+    fn unique_filename_multiple_duplicates() {
+        let mut used = HashSet::new();
+        unique_filename("file.txt", &mut used);
+        unique_filename("file.txt", &mut used); // → file_1.txt
+        assert_eq!(unique_filename("file.txt", &mut used), "file_2.txt");
+    }
+
+    #[test]
+    fn unique_filename_no_extension() {
+        let mut used = HashSet::new();
+        unique_filename("readme", &mut used);
+        assert_eq!(unique_filename("readme", &mut used), "readme_1");
+    }
+
+    #[test]
+    fn unique_filename_sanitizes_slashes() {
+        let mut used = HashSet::new();
+        assert_eq!(unique_filename("a/b\\c", &mut used), "a_b_c");
+    }
+
+    #[test]
+    fn unique_filename_empty_becomes_default() {
+        let mut used = HashSet::new();
+        assert_eq!(unique_filename("", &mut used), "attachment.bin");
+    }
+
+    #[test]
+    fn unique_filename_whitespace_only_becomes_default() {
+        let mut used = HashSet::new();
+        assert_eq!(unique_filename("   ", &mut used), "attachment.bin");
+    }
+}

@@ -315,3 +315,172 @@ pub fn write_conversation_pdfs(
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── mm_to_pt / pt_to_mm ──────────────────────────────────────────────────
+
+    #[test]
+    fn mm_to_pt_a4_width() {
+        // 210mm = 595.28pt (standard A4)
+        let pt = mm_to_pt(210.0);
+        assert!((pt - 595.28).abs() < 0.1, "got {}", pt);
+    }
+
+    #[test]
+    fn pt_to_mm_roundtrip() {
+        let mm = 100.0f32;
+        assert!((pt_to_mm(mm_to_pt(mm)) - mm).abs() < 0.001);
+    }
+
+    // ── sanitize_text ────────────────────────────────────────────────────────
+
+    #[test]
+    fn sanitize_ascii_unchanged() {
+        assert_eq!(sanitize_text("Hello, World!"), "Hello, World!");
+    }
+
+    #[test]
+    fn sanitize_latin1_supplement_passes() {
+        // é (0xE9) is valid Latin-1
+        assert_eq!(sanitize_text("café"), "café");
+    }
+
+    #[test]
+    fn sanitize_unicode_beyond_latin1_replaced() {
+        // € is U+20AC, beyond Latin-1
+        let result = sanitize_text("price: €100");
+        assert_eq!(result, "price: ?100");
+    }
+
+    #[test]
+    fn sanitize_c1_control_range_replaced() {
+        // U+0080–U+009F are C1 controls, not printable in Windows-1252
+        let s: String = "\u{0082}".to_string();
+        assert_eq!(sanitize_text(&s), "?");
+    }
+
+    #[test]
+    fn sanitize_emoji_replaced() {
+        assert_eq!(sanitize_text("hi 😀"), "hi ?");
+    }
+
+    // ── is_exchange_dn ───────────────────────────────────────────────────────
+
+    #[test]
+    fn exchange_dn_detected_uppercase() {
+        assert!(is_exchange_dn("/O=CORP/OU=EXCHANGE/CN=user"));
+    }
+
+    #[test]
+    fn exchange_dn_detected_lowercase() {
+        assert!(is_exchange_dn("/o=corp/ou=exchange/cn=user"));
+    }
+
+    #[test]
+    fn exchange_dn_with_leading_whitespace() {
+        assert!(is_exchange_dn("  /O=CORP/CN=user"));
+    }
+
+    #[test]
+    fn normal_email_not_dn() {
+        assert!(!is_exchange_dn("user@example.com"));
+    }
+
+    #[test]
+    fn empty_string_not_dn() {
+        assert!(!is_exchange_dn(""));
+    }
+
+    // ── clean_address ────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_normal_email_passthrough() {
+        assert_eq!(
+            clean_address("user@example.com", false),
+            Some("user@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn clean_exchange_dn_hidden() {
+        assert_eq!(clean_address("/O=CORP/CN=user", false), None);
+    }
+
+    #[test]
+    fn clean_exchange_dn_shown_with_details() {
+        assert_eq!(
+            clean_address("/O=CORP/CN=user", true),
+            Some("/O=CORP/CN=user".to_string())
+        );
+    }
+
+    #[test]
+    fn clean_display_name_with_exchange_dn_shows_name() {
+        assert_eq!(
+            clean_address("John Smith </O=CORP/CN=jsmith>", false),
+            Some("John Smith".to_string())
+        );
+    }
+
+    #[test]
+    fn clean_no_name_with_exchange_dn_returns_none() {
+        assert_eq!(clean_address("</O=CORP/CN=jsmith>", false), None);
+    }
+
+    #[test]
+    fn clean_display_name_with_exchange_dn_shown_with_details() {
+        assert_eq!(
+            clean_address("John Smith </O=CORP/CN=jsmith>", true),
+            Some("John Smith </O=CORP/CN=jsmith>".to_string())
+        );
+    }
+
+    #[test]
+    fn clean_normal_name_and_email_passthrough() {
+        assert_eq!(
+            clean_address("John Smith <john@example.com>", false),
+            Some("John Smith <john@example.com>".to_string())
+        );
+    }
+
+    // ── word_wrap ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wrap_short_text_single_line() {
+        let lines = word_wrap("Hello world", 80);
+        assert_eq!(lines, vec!["Hello world"]);
+    }
+
+    #[test]
+    fn wrap_long_text_breaks() {
+        let text = "one two three four five";
+        let lines = word_wrap(text, 12);
+        // "one two" = 7, "three four" = 10, "five" = 4
+        assert!(lines.len() > 1);
+        // Reassembled text should match original words
+        let rejoined = lines.join(" ");
+        assert_eq!(rejoined, text);
+    }
+
+    #[test]
+    fn wrap_preserves_empty_lines() {
+        let lines = word_wrap("para one\n\npara two", 80);
+        assert!(lines.contains(&String::new()), "empty line should be preserved");
+    }
+
+    #[test]
+    fn wrap_empty_string() {
+        let lines = word_wrap("", 80);
+        assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn wrap_single_word_longer_than_limit() {
+        // A word longer than max_chars should still appear on its own line
+        let lines = word_wrap("superlongword", 5);
+        assert_eq!(lines, vec!["superlongword"]);
+    }
+}
