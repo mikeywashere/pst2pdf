@@ -1,85 +1,77 @@
 # pst2pdf
 
-A C++17 command-line tool that reads an Outlook PST file and produces a PDF where each email conversation thread is rendered as its own labeled section.
+A Rust command-line tool that converts an Outlook PST email archive into PDF. It traverses every folder in the PST, groups messages into conversation threads, and writes the result as a readable, formatted PDF.
 
-## What it does
+## Features
 
-`pst2pdf` opens a `.pst` file, traverses all folders recursively (Inbox, Sent Items, Deleted Items, and any custom folders), extracts every email message, groups the messages into conversation threads by normalizing the subject line (stripping RE:/FW:/FWD: prefixes), and writes a PDF. Each thread occupies its own page. Within a thread, messages are listed chronologically with date, sender, recipients, subject, and body.
-
-## Dependencies
-
-| Dependency | Purpose |
-|------------|---------|
-| [pstsdk](https://github.com/enrondata/pstsdk) | C++ header-only library for reading PST/OST files |
-| [libHaru (libharu)](http://libharu.org/) | C library for PDF generation |
-| [Boost](https://www.boost.org/) ≥ 1.67 | Required by pstsdk (`filesystem`, `system`, `optional`) |
-| CMake ≥ 3.16 | Build system |
-| C++17 compiler | GCC ≥ 8, Clang ≥ 7, MSVC ≥ 2019 |
-
-### Installing dependencies
-
-**Ubuntu / Debian:**
-```bash
-sudo apt-get install libboost-filesystem-dev libboost-system-dev libharu-dev
-# pstsdk is header-only; clone and note the include path:
-git clone https://github.com/enrondata/pstsdk /opt/pstsdk
-```
-
-**macOS (Homebrew):**
-```bash
-brew install boost libharu
-git clone https://github.com/enrondata/pstsdk /opt/pstsdk
-```
-
-**Windows (vcpkg):**
-```powershell
-vcpkg install boost-filesystem boost-system libharu
-# pstsdk — clone manually:
-git clone https://github.com/enrondata/pstsdk C:\opt\pstsdk
-```
+- Recursively traverses all PST folders (Inbox, Sent Items, custom folders, etc.)
+- Groups messages into conversation threads by normalized subject
+- Outputs a single combined PDF **or** one PDF per conversation thread
+- Exports attachments to a folder, with optional per-conversation numbering
+- Filters internal Exchange DN addresses (`/O=…/CN=…`) from display by default
+- Supports both Unicode and ANSI PST formats
 
 ## Build
 
-```bash
-cmake -B build \
-      -DPSTSDK_ROOT=/opt/pstsdk \
-      -DLIBHARU_ROOT=/usr/local   # omit if found automatically
-cmake --build build
-```
+Requires [Rust](https://rustup.rs/) (stable).
 
-On Windows with vcpkg:
 ```powershell
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=C:/vcpkg/scripts/buildsystems/vcpkg.cmake `
-               -DPSTSDK_ROOT=C:/opt/pstsdk
-cmake --build build --config Release
+cargo build --release
 ```
 
-The binary is `build/pst2pdf` (or `build/Release/pst2pdf.exe` on Windows).
+The binary will be at `target\release\pst2pdf.exe`.
 
 ## Usage
 
 ```
-pst2pdf <input.pst>
+pst2pdf --pst <FILE> [OPTIONS]
 ```
 
-Produces `<input>.pdf` in the same directory as the input file.
+| Flag | Description |
+|------|-------------|
+| `--pst <FILE>` | Path to the PST file to convert *(required)* |
+| `--output <FILE>` | Output PDF path (default: same name as PST with `.pdf` extension) |
+| `--conversations` | Write one PDF per conversation thread instead of one combined PDF |
+| `--attachments <DIR>` | Extract attachments into this folder |
+| `--showdetails` | Show raw Exchange DN addresses in From/To fields |
 
-**Example:**
-```bash
-./pst2pdf myarchive.pst
+Running with no arguments prints help.
+
+## Examples
+
+**Convert a PST to a single PDF:**
+```powershell
+pst2pdf --pst myarchive.pst
 # → myarchive.pdf
 ```
 
-Progress and warnings are printed to stdout/stderr:
-```
-Read 4231 messages from myarchive.pst
-Found 812 conversation threads
-PDF written to myarchive.pdf
+**Specify an output path:**
+```powershell
+pst2pdf --pst myarchive.pst --output C:\exports\email.pdf
 ```
 
-## Known limitations
+**One PDF per conversation thread:**
+```powershell
+pst2pdf --pst myarchive.pst --conversations --output C:\exports\myarchive.pdf
+# → C:\exports\myarchive-00001.pdf
+# → C:\exports\myarchive-00002.pdf
+# → ...
+```
 
-- **Thread grouping is a heuristic.** Messages are grouped by normalized subject (RE:/FW:/FWD: stripped, lowercased). Unrelated messages with the same subject will be merged, and related messages with edited subjects will be separated.
-- **Attachments are not included.** Only the message body (plain text, or HTML with tags stripped) is rendered.
-- **Wide characters are lossy.** Non-ASCII characters in sender names, subjects, and bodies are converted with a best-effort narrow conversion; characters outside ASCII are replaced with `?`. A proper UTF-8 → Latin-1 or full Unicode font embedding would be required for full internationalization.
-- **pstsdk API compatibility.** pstsdk is a research-grade library with limited maintenance. The API calls in `pst_reader.cpp` are marked `// TODO: verify API` where the exact method names may differ between versions.
+**Export attachments alongside conversation PDFs:**
+```powershell
+pst2pdf --pst myarchive.pst --conversations --attachments C:\exports\attachments
+# Attachments are prefixed with the conversation number:
+# → C:\exports\attachments\myarchive-00003-photo.jpg
+```
+
+**Show internal Exchange addresses:**
+```powershell
+pst2pdf --pst myarchive.pst --showdetails
+```
+
+## Notes
+
+- Thread grouping is heuristic: messages are grouped by normalized subject (RE:/FW:/FWD: prefixes stripped, case-folded). Unrelated messages sharing a subject will be merged; related messages with edited subjects will be split.
+- Non-Latin-1 characters in names, subjects, and bodies are replaced with `?` (built-in PDF fonts are Windows-1252).
+- Attachment extraction uses the MS-PST spec §2.4.6.1.3 approach: each attachment's sub-node NID is read directly from the attachment table row ID.
