@@ -1,0 +1,15 @@
+[package]
+name = "pst2pdf"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "pst2pdf"
+path = "src/main.rs"
+
+[dependencies]
+outlook-pst = "1.2"
+printpdf = "0.9"
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+chrono = "0.4"

@@ -1,0 +1,21 @@
+{
+  "universe_usage_history": [
+    {
+      "universe": "Breaking Bad",
+      "assignment_id": "pst2pdf-2026-04-14",
+      "used_at": "2026-04-14T23:36:17.000Z"
+    }
+  ],
+  "assignment_cast_snapshots": {
+    "pst2pdf-2026-04-14": {
+      "universe": "Breaking Bad",
+      "agents": {
+        "lead": "Walt",
+        "core-dev-pst": "Mike",
+        "core-dev-pdf": "Gus",
+        "tester": "Hank"
+      },
+      "created_at": "2026-04-14T23:36:17.000Z"
+    }
+  }
+}
