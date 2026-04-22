@@ -1,22 +1,28 @@
-name: Build and Release (Rust)
+name: Release (Rust Multi‑Platform)
 
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  APP_NAME: pst2pdf
+
 jobs:
   build:
-    name: Build for ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
+    name: Build & Package
+    runs-on: ubuntu-latest
 
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - target: x86_64-unknown-linux-gnu
+          - target: x86_64-pc-windows-gnu
+          - target: x86_64-apple-darwin
 
     steps:
       - name: Checkout
@@ -27,28 +33,116 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
+      - name: Install cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
 
-      - name: Package binary
-        shell: bash
+      - name: Build with cross
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Prepare dist
         run: |
-          mkdir dist
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            cp target/${{ matrix.target }}/release/*.exe dist/
-            cd dist
-            zip ../${{ matrix.target }}.zip *.exe
-          else
-            cp target/${{ matrix.target }}/release/* dist/
-            cd dist
-            tar -czf ../${{ matrix.target }}.tar.gz *
-          fi
+          mkdir -p dist/${{ matrix.target }}
+          cp target/${{ matrix.target }}/release/${APP_NAME}* dist/${{ matrix.target }}/
 
-      - name: Upload Release Assets
+      - name: Package archives
+        run: |
+          cd dist/${{ matrix.target }}
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            zip ../${APP_NAME}-${{ matrix.target }}.zip *
+          else
+            tar -czf ../${APP_NAME}-${{ matrix.target }}.tar.gz *
+          fi
+        shell: bash
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/${APP_NAME}-${{ matrix.target }}.*
+
+  sbom_slsa:
+    name: SBOM + SLSA
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install CycloneDX generator
+        run: cargo install cargo-cyclonedx
+
+      - name: Generate SBOM
+        run: cargo cyclonedx --output-format json --output sbom.json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: sbom.json
+
+      - name: Generate SLSA provenance
+        uses: slsa-framework/slsa-github-generator/actions/generator@v2
+        with:
+          artifact_path: .
+          output_path: provenance.json
+
+      - name: Upload provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: provenance
+          path: provenance.json
+
+  release:
+    name: Create GitHub Release
+    needs: [build, sbom_slsa]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            *.zip
-            *.tar.gz
+          files: release-assets/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  package_managers:
+    name: Homebrew + Winget + Cargo‑dist
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -------------------------
+      # Homebrew (stub)
+      # -------------------------
+      - name: Update Homebrew formula
+        run: |
+          echo "TODO: Update your Homebrew tap repo here"
+          echo "Example: bump version + URLs in homebrew-tap/pst2pdf.rb"
+
+      # -------------------------
+      # Winget (stub)
+      # -------------------------
+      - name: Update Winget manifest
+        run: |
+          echo "TODO: Generate Winget YAML and submit PR to winget-pkgs"
+
+      # -------------------------
+      # Cargo-dist (stub)
+      # -------------------------
+      - name: Cargo-dist integration
+        run: |
+          echo "TODO: If using cargo-dist, run cargo dist build here"
+          # cargo install cargo-dist
+          # cargo dist build --target ...
