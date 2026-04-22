@@ -554,8 +554,21 @@ fn write_eml_attachment(
     std::fs::write(&dest, bytes).is_ok()
 }
 
+/// Maximum bytes we will decompress into RAM for EML→PDF conversion (50 MB).
+/// Content larger than this is streamed directly to disk instead.
+const MAX_EML_BYTES: u64 = 50 * 1024 * 1024;
+
 /// Decompress an `.emz` archive, locate the first `.eml` entry, decode it to
-/// PDF, and save it. Falls back to saving the raw `.emz` bytes on any failure.
+/// PDF, and save it.
+///
+/// Large content is streamed directly to disk to avoid OOM. The fallback
+/// chain is:
+///   1. zip → .eml found, small  → PDF
+///   2. zip → .eml found, large  → stream raw .eml to disk
+///   3. gzip → EML heuristic, small → PDF
+///   4. gzip → EML heuristic, large → stream decompressed .eml to disk
+///   5. gzip → non-EML content   → stream decompressed file to disk
+///   6. everything failed        → save original .emz bytes
 fn write_emz_attachment(
     bytes: &[u8],
     raw_name: &str,
@@ -568,32 +581,70 @@ fn write_emz_attachment(
         .and_then(|s| s.to_str())
         .unwrap_or(raw_name);
 
-    // Try zip extraction first (the user-specified "unzip" path), then gzip.
-    let eml_data = try_zip_find_eml(bytes).or_else(|| {
-        let decompressed = try_gunzip(bytes)?;
-        if looks_like_eml(&decompressed) {
-            Some(decompressed)
+    // ── 1 & 2: zip path ──────────────────────────────────────────────────────
+    if zip_has_eml(bytes) {
+        if let Some(eml_data) = try_zip_find_eml(bytes) {
+            // Small enough – try PDF conversion.
+            if let Some(pdf_bytes) = eml_bytes_to_pdf(&eml_data) {
+                let name = unique_filename(&format!("{}{}.pdf", prefix, stem), used_names);
+                if std::fs::write(output_dir.join(&name), pdf_bytes).is_ok() {
+                    return true;
+                }
+            }
+            // PDF failed – save as raw .eml.
+            let name = unique_filename(&format!("{}{}.eml", prefix, stem), used_names);
+            if std::fs::write(output_dir.join(&name), &eml_data).is_ok() {
+                return true;
+            }
         } else {
-            None
-        }
-    });
-
-    if let Some(eml_bytes) = eml_data {
-        if let Some(pdf_bytes) = eml_bytes_to_pdf(&eml_bytes) {
-            let pdf_name = format!("{}{}.pdf", prefix, stem);
-            let filename = unique_filename(&pdf_name, used_names);
-            let dest = output_dir.join(&filename);
-            if std::fs::write(&dest, pdf_bytes).is_ok() {
+            // Entry exists but is too large – stream directly to disk.
+            let name = unique_filename(&format!("{}{}.eml", prefix, stem), used_names);
+            if zip_stream_eml_to_file(bytes, &output_dir.join(&name)) {
                 return true;
             }
         }
     }
 
-    // Fallback: save original bytes
+    // ── 3, 4 & 5: gzip path ──────────────────────────────────────────────────
+    if is_gzip_magic(bytes) {
+        // Peek at a small prefix to decide what the decompressed content is.
+        let prefix_data = gunzip_prefix(bytes).unwrap_or_default();
+
+        if looks_like_eml(&prefix_data) {
+            // Try to decompress within the memory budget.
+            if let Some(eml_data) = try_gunzip_limited(bytes) {
+                // Small enough – try PDF conversion.
+                if let Some(pdf_bytes) = eml_bytes_to_pdf(&eml_data) {
+                    let name = unique_filename(&format!("{}{}.pdf", prefix, stem), used_names);
+                    if std::fs::write(output_dir.join(&name), pdf_bytes).is_ok() {
+                        return true;
+                    }
+                }
+                // PDF failed – save decompressed bytes as .eml.
+                let name = unique_filename(&format!("{}{}.eml", prefix, stem), used_names);
+                if std::fs::write(output_dir.join(&name), &eml_data).is_ok() {
+                    return true;
+                }
+            } else {
+                // Too large – stream decompressed bytes to disk as .eml.
+                let name = unique_filename(&format!("{}{}.eml", prefix, stem), used_names);
+                if gunzip_to_file(bytes, &output_dir.join(&name)) {
+                    return true;
+                }
+            }
+        } else {
+            // Not EML – stream whatever was decompressed to disk.
+            let name = unique_filename(&format!("{}{}", prefix, raw_name), used_names);
+            if gunzip_to_file(bytes, &output_dir.join(&name)) {
+                return true;
+            }
+        }
+    }
+
+    // ── 6: last resort – save original bytes ─────────────────────────────────
     let orig = format!("{}{}", prefix, raw_name);
     let filename = unique_filename(&orig, used_names);
-    let dest = output_dir.join(&filename);
-    std::fs::write(&dest, bytes).is_ok()
+    std::fs::write(output_dir.join(&filename), bytes).is_ok()
 }
 
 /// Convert an `AddressRef` (which doesn't implement Display) to a string.
@@ -721,16 +772,67 @@ fn eml_is_plain_text(part: &eml_codec::part::AnyPart<'_>) -> bool {
     }
 }
 
-/// Attempt to decompress bytes as a (possibly multi-stream) gzip archive.
-fn try_gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
-    use flate2::read::MultiGzDecoder;
-    let mut dec = MultiGzDecoder::new(bytes);
-    let mut out = Vec::new();
-    dec.read_to_end(&mut out).ok()?;
-    if out.is_empty() { None } else { Some(out) }
+/// Returns true if the bytes start with the gzip magic number.
+fn is_gzip_magic(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
 }
 
-/// Walk a zip archive and return the bytes of the first `.eml` entry found.
+/// Decompress only the first ~512 bytes of a gzip stream for heuristic checks.
+fn gunzip_prefix(bytes: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::MultiGzDecoder;
+    let mut dec = MultiGzDecoder::new(bytes);
+    let mut buf = vec![0u8; 512];
+    let n = dec.read(&mut buf).ok()?;
+    if n == 0 { None } else { buf.truncate(n); Some(buf) }
+}
+
+/// Decompress a gzip stream into memory, but only up to `MAX_EML_BYTES`.
+/// Returns `None` if the stream is invalid or exceeds the limit.
+fn try_gunzip_limited(bytes: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::MultiGzDecoder;
+    let mut out = Vec::new();
+    // Read one extra byte so we can detect "exceeds limit" vs "reached EOF".
+    MultiGzDecoder::new(bytes)
+        .take(MAX_EML_BYTES + 1)
+        .read_to_end(&mut out)
+        .ok()?;
+    if out.is_empty() || out.len() as u64 > MAX_EML_BYTES {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Stream a gzip archive to a file without buffering in RAM.
+fn gunzip_to_file(bytes: &[u8], dest: &Path) -> bool {
+    use flate2::read::MultiGzDecoder;
+    let file = match std::fs::File::create(dest) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut dec = MultiGzDecoder::new(bytes);
+    std::io::copy(&mut dec, &mut std::io::BufWriter::new(file)).is_ok()
+}
+
+/// Return true if the byte slice is a valid zip archive that contains at
+/// least one `.eml` entry (does not extract anything).
+fn zip_has_eml(bytes: &[u8]) -> bool {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = match zip::ZipArchive::new(cursor) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    (0..archive.len()).any(|i| {
+        archive
+            .by_index(i)
+            .ok()
+            .map(|f| f.name().to_lowercase().ends_with(".eml"))
+            .unwrap_or(false)
+    })
+}
+
+/// Extract the first `.eml` entry from a zip archive into memory.
+/// Returns `None` if no `.eml` entry exists or the entry exceeds `MAX_EML_BYTES`.
 fn try_zip_find_eml(bytes: &[u8]) -> Option<Vec<u8>> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor).ok()?;
@@ -739,14 +841,39 @@ fn try_zip_find_eml(bytes: &[u8]) -> Option<Vec<u8>> {
             Ok(f) => f,
             Err(_) => continue,
         };
-        if file.name().to_lowercase().ends_with(".eml") {
-            let mut buf = Vec::new();
-            if file.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
-                return Some(buf);
-            }
+        if !file.name().to_lowercase().ends_with(".eml") {
+            continue;
+        }
+        if file.size() > MAX_EML_BYTES {
+            return None; // signal: entry exists but is too large
+        }
+        let mut buf = Vec::new();
+        if file.take(MAX_EML_BYTES).read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+            return Some(buf);
         }
     }
     None
+}
+
+/// Stream the first `.eml` entry in a zip archive directly to a file.
+fn zip_stream_eml_to_file(bytes: &[u8], dest: &Path) -> bool {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = match zip::ZipArchive::new(cursor) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+    for i in 0..archive.len() {
+        let mut file = match archive.by_index(i) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if file.name().to_lowercase().ends_with(".eml") {
+            if let Ok(out) = std::fs::File::create(dest) {
+                return std::io::copy(&mut file, &mut std::io::BufWriter::new(out)).is_ok();
+            }
+        }
+    }
+    false
 }
 
 /// Heuristic: does this byte slice look like an RFC-5322 email message?
