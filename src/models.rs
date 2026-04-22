@@ -9,6 +9,8 @@ pub struct EmailMessage {
     pub subject: String,
     pub body: String,
     pub normalized_subject: String,
+    /// PST node ID — used to correlate messages with their attachments
+    pub node_id: u32,
 }
 
 #[derive(Debug)]

@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 
@@ -138,7 +138,7 @@ fn traverse_folder(
             seen.insert(dedup_key);
 
             if let Ok(msg) = store.open_message(&entry_id, None) {
-                if let Ok(email) = extract_message(&msg) {
+                if let Ok(email) = extract_message(&msg, node_val) {
                     messages.push(email);
                 }
             }
@@ -220,7 +220,7 @@ fn extract_recipients(msg: &Rc<dyn Message>) -> Vec<String> {
     recipients
 }
 
-fn extract_message(msg: &Rc<dyn Message>) -> Result<EmailMessage> {
+fn extract_message(msg: &Rc<dyn Message>, node_id: u32) -> Result<EmailMessage> {
     let props = msg.properties();
 
     let subject = props
@@ -273,6 +273,7 @@ fn extract_message(msg: &Rc<dyn Message>) -> Result<EmailMessage> {
         subject,
         body,
         normalized_subject,
+        node_id,
     })
 }
 
@@ -294,7 +295,7 @@ pub fn save_attachments(pst_path: &Path, output_dir: &Path) -> Result<usize> {
         let mut saved = 0usize;
         for entry_id in &entry_ids {
             if let Ok(msg) = UnicodeMessage::read(store.clone(), entry_id, None) {
-                saved += save_unicode_message_attachments(&msg, output_dir, &mut used_names);
+                saved += save_unicode_message_attachments(&msg, output_dir, &mut used_names, "");
             }
         }
         return Ok(saved);
@@ -310,7 +311,66 @@ pub fn save_attachments(pst_path: &Path, output_dir: &Path) -> Result<usize> {
     let mut saved = 0usize;
     for entry_id in &entry_ids {
         if let Ok(msg) = AnsiMessage::read(store.clone(), entry_id, None) {
-            saved += save_ansi_message_attachments(&msg, output_dir, &mut used_names);
+            saved += save_ansi_message_attachments(&msg, output_dir, &mut used_names, "");
+        }
+    }
+    Ok(saved)
+}
+
+/// Save attachments for all messages, prefixing each attachment filename with
+/// the 1-based conversation index so attachments can be correlated to their PDF.
+/// Called when `--conversations` and `--attachments` are both set.
+pub fn save_attachments_for_threads(
+    pst_path: &Path,
+    output_dir: &Path,
+    threads: &[crate::models::ConversationThread],
+    stem: &str,
+) -> Result<usize> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
+
+    // Build map from message node_id → 1-based thread index
+    let mut nid_to_thread: HashMap<u32, usize> = HashMap::new();
+    for (i, thread) in threads.iter().enumerate() {
+        for msg in &thread.messages {
+            nid_to_thread.insert(msg.node_id, i + 1);
+        }
+    }
+
+    let mut used_names: HashSet<String> = HashSet::new();
+
+    if let Ok(pst_file) = UnicodePstFile::open(pst_path) {
+        let store = UnicodeStore::read(Rc::new(pst_file))
+            .with_context(|| format!("Failed to open Unicode PST store: {}", pst_path.display()))?;
+        let dyn_store: Rc<dyn Store> = store.clone();
+        let entry_ids = collect_message_entry_ids(&dyn_store);
+        let mut saved = 0usize;
+        for entry_id in &entry_ids {
+            let nid = u32::from(entry_id.node_id());
+            if let Some(&thread_idx) = nid_to_thread.get(&nid) {
+                let prefix = format!("{}-{:05}-", stem, thread_idx);
+                if let Ok(msg) = UnicodeMessage::read(store.clone(), entry_id, None) {
+                    saved += save_unicode_message_attachments(&msg, output_dir, &mut used_names, &prefix);
+                }
+            }
+        }
+        return Ok(saved);
+    }
+
+    let pst_file = AnsiPstFile::open(pst_path)
+        .with_context(|| format!("Failed to open PST file: {}", pst_path.display()))?;
+    let store = AnsiStore::read(Rc::new(pst_file))
+        .with_context(|| format!("Failed to open ANSI PST store: {}", pst_path.display()))?;
+    let dyn_store: Rc<dyn Store> = store.clone();
+    let entry_ids = collect_message_entry_ids(&dyn_store);
+    let mut saved = 0usize;
+    for entry_id in &entry_ids {
+        let nid = u32::from(entry_id.node_id());
+        if let Some(&thread_idx) = nid_to_thread.get(&nid) {
+            let prefix = format!("{}-{:05}-", stem, thread_idx);
+            if let Ok(msg) = AnsiMessage::read(store.clone(), entry_id, None) {
+                saved += save_ansi_message_attachments(&msg, output_dir, &mut used_names, &prefix);
+            }
         }
     }
     Ok(saved)
@@ -373,6 +433,7 @@ fn save_unicode_message_attachments(
     msg: &Rc<UnicodeMessage>,
     output_dir: &Path,
     used_names: &mut HashSet<String>,
+    prefix: &str,
 ) -> usize {
     let table = match msg.attachment_table() {
         Some(t) => t,
@@ -390,7 +451,7 @@ fn save_unicode_message_attachments(
             Ok(a) => a,
             Err(_) => continue,
         };
-        if write_attachment(attachment.data(), attachment.properties(), output_dir, used_names) {
+        if write_attachment(attachment.data(), attachment.properties(), output_dir, used_names, prefix) {
             count += 1;
         }
     }
@@ -402,6 +463,7 @@ fn save_ansi_message_attachments(
     msg: &Rc<AnsiMessage>,
     output_dir: &Path,
     used_names: &mut HashSet<String>,
+    prefix: &str,
 ) -> usize {
     let table = match msg.attachment_table() {
         Some(t) => t,
@@ -417,7 +479,7 @@ fn save_ansi_message_attachments(
             Ok(a) => a,
             Err(_) => continue,
         };
-        if write_attachment(attachment.data(), attachment.properties(), output_dir, used_names) {
+        if write_attachment(attachment.data(), attachment.properties(), output_dir, used_names, prefix) {
             count += 1;
         }
     }
@@ -429,6 +491,7 @@ fn write_attachment(
     props: &outlook_pst::messaging::attachment::AttachmentProperties,
     output_dir: &Path,
     used_names: &mut HashSet<String>,
+    prefix: &str,
 ) -> bool {
     let bytes = match data {
         Some(AttachmentData::Binary(bv)) => bv.buffer(),
@@ -444,7 +507,8 @@ fn write_attachment(
         .or_else(|| props.get(PR_ATTACH_FILENAME).and_then(prop_to_string))
         .unwrap_or_else(|| "attachment.bin".to_string());
 
-    let filename = unique_filename(&raw_name, used_names);
+    let prefixed_name = format!("{}{}", prefix, raw_name);
+    let filename = unique_filename(&prefixed_name, used_names);
     let dest = output_dir.join(&filename);
     std::fs::write(&dest, bytes).is_ok()
 }

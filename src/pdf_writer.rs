@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use chrono::DateTime;
 use printpdf::{
     BuiltinFont, Mm, Op, PdfDocument, PdfFontHandle, PdfPage, PdfSaveOptions, Point, Pt, Rect,
@@ -192,6 +192,61 @@ impl PageWriter {
     }
 }
 
+fn render_messages_to_writer(
+    writer: &mut PageWriter,
+    messages: &[crate::models::EmailMessage],
+    normal_font: &PdfFontHandle,
+    bold_font: &PdfFontHandle,
+    show_details: bool,
+) {
+    for msg in messages {
+        writer.write_blank_line(normal_font, FONT_SIZE_PT);
+
+        let date_str = msg
+            .date
+            .map(|d: DateTime<_>| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "(unknown date)".to_string());
+
+        let from_str = {
+            let addr_clean = if is_exchange_dn(&msg.from_address) && !show_details {
+                String::new()
+            } else {
+                msg.from_address.clone()
+            };
+            if addr_clean.is_empty() {
+                msg.from_name.clone()
+            } else if msg.from_name.is_empty() {
+                addr_clean
+            } else {
+                format!("{} <{}>", msg.from_name, addr_clean)
+            }
+        };
+
+        let to_parts: Vec<String> = msg
+            .to_recipients
+            .iter()
+            .filter_map(|r| clean_address(r, show_details))
+            .collect();
+        let to_str = if to_parts.is_empty() {
+            "(unknown)".to_string()
+        } else {
+            to_parts.join(", ")
+        };
+
+        writer.write_line(&format!("Date:    {}", date_str), bold_font, FONT_SIZE_PT);
+        writer.write_line(&format!("From:    {}", from_str), bold_font, FONT_SIZE_PT);
+        writer.write_wrapped(&format!("To:      {}", to_str), bold_font, FONT_SIZE_PT);
+        writer.write_line(&format!("Subject: {}", msg.subject), bold_font, FONT_SIZE_PT);
+        writer.write_line(&"-".repeat(60), normal_font, FONT_SIZE_PT);
+
+        if msg.body.is_empty() {
+            writer.write_line("(no body)", normal_font, FONT_SIZE_PT);
+        } else {
+            writer.write_wrapped(&msg.body, normal_font, FONT_SIZE_PT);
+        }
+    }
+}
+
 pub fn write_pdf(threads: &[ConversationThread], output_path: &Path, show_details: bool) -> Result<()> {
     let title = output_path
         .file_stem()
@@ -221,62 +276,44 @@ pub fn write_pdf(threads: &[ConversationThread], output_path: &Path, show_detail
             FONT_SIZE_PT,
         );
 
-        for msg in &thread.messages {
-            writer.write_blank_line(&normal_font, FONT_SIZE_PT);
-
-            // Message metadata
-            let date_str = msg
-                .date
-                .map(|d: DateTime<_>| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
-                .unwrap_or_else(|| "(unknown date)".to_string());
-
-            let from_str = {
-                let addr_clean = if is_exchange_dn(&msg.from_address) && !show_details {
-                    String::new()
-                } else {
-                    msg.from_address.clone()
-                };
-                if addr_clean.is_empty() {
-                    msg.from_name.clone()
-                } else if msg.from_name.is_empty() {
-                    addr_clean
-                } else {
-                    format!("{} <{}>", msg.from_name, addr_clean)
-                }
-            };
-
-            let to_parts: Vec<String> = msg
-                .to_recipients
-                .iter()
-                .filter_map(|r| clean_address(r, show_details))
-                .collect();
-            let to_str = if to_parts.is_empty() {
-                "(unknown)".to_string()
-            } else {
-                to_parts.join(", ")
-            };
-
-            writer.write_line(&format!("Date:    {}", date_str), &bold_font, FONT_SIZE_PT);
-            writer.write_line(&format!("From:    {}", from_str), &bold_font, FONT_SIZE_PT);
-            writer.write_wrapped(&format!("To:      {}", to_str), &bold_font, FONT_SIZE_PT);
-            writer.write_line(
-                &format!("Subject: {}", msg.subject),
-                &bold_font,
-                FONT_SIZE_PT,
-            );
-            writer.write_line(&"-".repeat(60), &normal_font, FONT_SIZE_PT);
-
-            // Message body
-            if msg.body.is_empty() {
-                writer.write_line("(no body)", &normal_font, FONT_SIZE_PT);
-            } else {
-                writer.write_wrapped(&msg.body, &normal_font, FONT_SIZE_PT);
-            }
-        }
+        render_messages_to_writer(&mut writer, &thread.messages, &normal_font, &bold_font, show_details);
     }
 
     let doc = writer.finalize();
     let bytes = doc.save(&PdfSaveOptions::default(), &mut Vec::new());
     std::fs::write(output_path, &bytes)?;
+    Ok(())
+}
+
+/// Write one PDF file per conversation thread.
+/// Files are named `<stem>-00001.pdf`, `<stem>-00002.pdf`, etc., written into
+/// the same directory as `output_path`. Each PDF contains only the messages for
+/// that thread (no bold "Thread:" header block).
+pub fn write_conversation_pdfs(
+    threads: &[ConversationThread],
+    output_path: &Path,
+    show_details: bool,
+) -> Result<()> {
+    let stem = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("pst2pdf");
+    let parent = output_path.parent().unwrap_or(std::path::Path::new("."));
+
+    let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
+    let bold_font = PdfFontHandle::Builtin(BuiltinFont::HelveticaBold);
+
+    for (i, thread) in threads.iter().enumerate() {
+        let filename = format!("{}-{:05}.pdf", stem, i + 1);
+        let path = parent.join(&filename);
+
+        let mut writer = PageWriter::new(&thread.display_subject);
+        render_messages_to_writer(&mut writer, &thread.messages, &normal_font, &bold_font, show_details);
+
+        let doc = writer.finalize();
+        let bytes = doc.save(&PdfSaveOptions::default(), &mut Vec::new());
+        std::fs::write(&path, &bytes)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
     Ok(())
 }

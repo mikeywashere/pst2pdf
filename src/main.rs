@@ -28,6 +28,11 @@ struct Args {
     /// Folder to export attachments into (optional)
     #[arg(long, value_name = "DIR")]
     attachments: Option<PathBuf>,
+
+    /// Write one PDF per conversation thread instead of a single combined PDF.
+    /// Files are named <output>-00001.pdf, <output>-00002.pdf, etc.
+    #[arg(long)]
+    conversations: bool,
 }
 
 fn main() -> Result<()> {
@@ -47,18 +52,38 @@ fn main() -> Result<()> {
     let threads = thread_grouper::group_by_thread(messages);
     println!("Grouped into {} conversation threads", threads.len());
 
-    println!("Writing PDF: {}", output_path.display());
-    pdf_writer::write_pdf(&threads, &output_path, args.showdetails)
-        .with_context(|| format!("Failed to write {}", output_path.display()))?;
+    if args.conversations {
+        let stem = output_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("pst2pdf")
+            .to_string();
+        let parent = output_path.parent().unwrap_or(std::path::Path::new("."));
+        if let Some(p) = parent.to_str().filter(|s| !s.is_empty()) {
+            println!("Writing {} conversation PDFs to: {}", threads.len(), p);
+        }
+        pdf_writer::write_conversation_pdfs(&threads, &output_path, args.showdetails)
+            .with_context(|| format!("Failed to write conversation PDFs"))?;
 
-    println!("Done.");
+        if let Some(att_dir) = &args.attachments {
+            println!("Extracting attachments to: {}", att_dir.display());
+            let count = pst_reader::save_attachments_for_threads(&args.pst, att_dir, &threads, &stem)
+                .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
+            println!("Saved {} attachment(s).", count);
+        }
+    } else {
+        println!("Writing PDF: {}", output_path.display());
+        pdf_writer::write_pdf(&threads, &output_path, args.showdetails)
+            .with_context(|| format!("Failed to write {}", output_path.display()))?;
 
-    if let Some(att_dir) = &args.attachments {
-        println!("Extracting attachments to: {}", att_dir.display());
-        let count = pst_reader::save_attachments(&args.pst, att_dir)
-            .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
-        println!("Saved {} attachment(s).", count);
+        if let Some(att_dir) = &args.attachments {
+            println!("Extracting attachments to: {}", att_dir.display());
+            let count = pst_reader::save_attachments(&args.pst, att_dir)
+                .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
+            println!("Saved {} attachment(s).", count);
+        }
     }
 
+    println!("Done.");
     Ok(())
 }
