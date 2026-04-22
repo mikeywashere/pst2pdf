@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::Path;
 use std::rc::Rc;
 
@@ -507,10 +508,251 @@ fn write_attachment(
         .or_else(|| props.get(PR_ATTACH_FILENAME).and_then(prop_to_string))
         .unwrap_or_else(|| "attachment.bin".to_string());
 
+    let lower = raw_name.to_lowercase();
+
+    if lower.ends_with(".eml") {
+        return write_eml_attachment(bytes, &raw_name, output_dir, used_names, prefix);
+    }
+
+    if lower.ends_with(".emz") {
+        return write_emz_attachment(bytes, &raw_name, output_dir, used_names, prefix);
+    }
+
     let prefixed_name = format!("{}{}", prefix, raw_name);
     let filename = unique_filename(&prefixed_name, used_names);
     let dest = output_dir.join(&filename);
     std::fs::write(&dest, bytes).is_ok()
+}
+
+/// Decode an `.eml` attachment to PDF. Falls back to saving the raw bytes if
+/// parsing or rendering fails so the attachment is never silently dropped.
+fn write_eml_attachment(
+    bytes: &[u8],
+    raw_name: &str,
+    output_dir: &Path,
+    used_names: &mut HashSet<String>,
+    prefix: &str,
+) -> bool {
+    let stem = std::path::Path::new(raw_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(raw_name);
+
+    if let Some(pdf_bytes) = eml_bytes_to_pdf(bytes) {
+        let pdf_name = format!("{}{}.pdf", prefix, stem);
+        let filename = unique_filename(&pdf_name, used_names);
+        let dest = output_dir.join(&filename);
+        if std::fs::write(&dest, pdf_bytes).is_ok() {
+            return true;
+        }
+    }
+
+    // Fallback: save original bytes
+    let orig = format!("{}{}", prefix, raw_name);
+    let filename = unique_filename(&orig, used_names);
+    let dest = output_dir.join(&filename);
+    std::fs::write(&dest, bytes).is_ok()
+}
+
+/// Decompress an `.emz` archive, locate the first `.eml` entry, decode it to
+/// PDF, and save it. Falls back to saving the raw `.emz` bytes on any failure.
+fn write_emz_attachment(
+    bytes: &[u8],
+    raw_name: &str,
+    output_dir: &Path,
+    used_names: &mut HashSet<String>,
+    prefix: &str,
+) -> bool {
+    let stem = std::path::Path::new(raw_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(raw_name);
+
+    // Try zip extraction first (the user-specified "unzip" path), then gzip.
+    let eml_data = try_zip_find_eml(bytes).or_else(|| {
+        let decompressed = try_gunzip(bytes)?;
+        if looks_like_eml(&decompressed) {
+            Some(decompressed)
+        } else {
+            None
+        }
+    });
+
+    if let Some(eml_bytes) = eml_data {
+        if let Some(pdf_bytes) = eml_bytes_to_pdf(&eml_bytes) {
+            let pdf_name = format!("{}{}.pdf", prefix, stem);
+            let filename = unique_filename(&pdf_name, used_names);
+            let dest = output_dir.join(&filename);
+            if std::fs::write(&dest, pdf_bytes).is_ok() {
+                return true;
+            }
+        }
+    }
+
+    // Fallback: save original bytes
+    let orig = format!("{}{}", prefix, raw_name);
+    let filename = unique_filename(&orig, used_names);
+    let dest = output_dir.join(&filename);
+    std::fs::write(&dest, bytes).is_ok()
+}
+
+/// Convert an `AddressRef` (which doesn't implement Display) to a string.
+fn address_ref_to_string(addr: &eml_codec::imf::address::AddressRef<'_>) -> String {
+    use eml_codec::imf::address::AddressRef;
+    match addr {
+        AddressRef::Single(mailbox) => mailbox.to_string(),
+        AddressRef::Many(group) => group
+            .participants
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+    }
+}
+
+/// Parse EML bytes with eml-codec and render to PDF bytes.
+/// Returns None if parsing fails. Note: eml-codec does not decode
+/// transfer-encodings (quoted-printable, base64), so body text may appear
+/// encoded for non-trivial messages.
+fn eml_bytes_to_pdf(bytes: &[u8]) -> Option<Vec<u8>> {
+    let (_, email) = eml_codec::parse_message(bytes).ok()?;
+
+    let subject = email
+        .imf
+        .subject
+        .as_ref()
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    let date = email
+        .imf
+        .date
+        .map(|d| d.to_rfc2822())
+        .unwrap_or_else(|| "(unknown date)".to_string());
+    let from = email
+        .imf
+        .from
+        .iter()
+        .map(|m| m.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let to = email
+        .imf
+        .to
+        .iter()
+        .map(address_ref_to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = eml_collect_body(&email.child);
+
+    Some(crate::pdf_writer::render_eml_to_pdf(
+        &subject, &date, &from, &to, &body,
+    ))
+}
+
+/// Recursively extract the most-readable text body from a MIME part tree.
+/// For `multipart/alternative` we prefer `text/plain` over `text/html`.
+/// For other multipart types we join all text children.
+fn eml_collect_body(part: &eml_codec::part::AnyPart<'_>) -> String {
+    use eml_codec::part::AnyPart;
+
+    match part {
+        AnyPart::Txt(text) => {
+            let sub = text
+                .mime
+                .fields
+                .ctype
+                .as_ref()
+                .and_then(|ct| std::str::from_utf8(ct.sub).ok())
+                .unwrap_or("plain")
+                .to_lowercase();
+            let raw = std::str::from_utf8(text.body).unwrap_or("").to_string();
+            if sub == "html" {
+                strip_html(&raw)
+            } else {
+                raw
+            }
+        }
+        AnyPart::Mult(mp) => {
+            let sub = mp
+                .mime
+                .fields
+                .ctype
+                .as_ref()
+                .and_then(|ct| std::str::from_utf8(ct.sub).ok())
+                .unwrap_or("")
+                .to_lowercase();
+
+            if sub == "alternative" {
+                // Prefer plain-text alternative; fall back to the first child.
+                if let Some(plain) = mp.children.iter().find(|c| eml_is_plain_text(c)) {
+                    return eml_collect_body(plain);
+                }
+                mp.children
+                    .first()
+                    .map(eml_collect_body)
+                    .unwrap_or_default()
+            } else {
+                mp.children
+                    .iter()
+                    .map(eml_collect_body)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        AnyPart::Msg(msg) => eml_collect_body(&msg.child),
+        AnyPart::Bin(_) => String::new(),
+    }
+}
+
+fn eml_is_plain_text(part: &eml_codec::part::AnyPart<'_>) -> bool {
+    if let eml_codec::part::AnyPart::Txt(text) = part {
+        let sub = text
+            .mime
+            .fields
+            .ctype
+            .as_ref()
+            .and_then(|ct| std::str::from_utf8(ct.sub).ok())
+            .unwrap_or("plain")
+            .to_lowercase();
+        sub == "plain"
+    } else {
+        false
+    }
+}
+
+/// Attempt to decompress bytes as a (possibly multi-stream) gzip archive.
+fn try_gunzip(bytes: &[u8]) -> Option<Vec<u8>> {
+    use flate2::read::MultiGzDecoder;
+    let mut dec = MultiGzDecoder::new(bytes);
+    let mut out = Vec::new();
+    dec.read_to_end(&mut out).ok()?;
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Walk a zip archive and return the bytes of the first `.eml` entry found.
+fn try_zip_find_eml(bytes: &[u8]) -> Option<Vec<u8>> {
+    let cursor = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(cursor).ok()?;
+    for i in 0..archive.len() {
+        let mut file = match archive.by_index(i) {
+            Ok(f) => f,
+            Err(_) => continue,
+        };
+        if file.name().to_lowercase().ends_with(".eml") {
+            let mut buf = Vec::new();
+            if file.read_to_end(&mut buf).is_ok() && !buf.is_empty() {
+                return Some(buf);
+            }
+        }
+    }
+    None
+}
+
+/// Heuristic: does this byte slice look like an RFC-5322 email message?
+fn looks_like_eml(data: &[u8]) -> bool {
+    let prefix = std::str::from_utf8(&data[..data.len().min(512)]).unwrap_or("");
+    prefix.contains("From:") || prefix.contains("Date:") || prefix.contains("MIME-Version:")
 }
 
 fn unique_filename(name: &str, used_names: &mut HashSet<String>) -> String {

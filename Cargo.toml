@@ -13,3 +13,6 @@ printpdf = "0.9"
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 chrono = "0.4"
+eml-codec = "0"
+flate2 = "1"
+zip = "2"

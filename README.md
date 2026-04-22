@@ -40,18 +40,18 @@ Running with no arguments prints help.
 ## Examples
 
 **Convert a PST to a single PDF:**
-```powershell
+```shell
 pst2pdf --pst myarchive.pst
 # → myarchive.pdf
 ```
 
 **Specify an output path:**
-```powershell
+```shell
 pst2pdf --pst myarchive.pst --output C:\exports\email.pdf
 ```
 
 **One PDF per conversation thread:**
-```powershell
+```shell
 pst2pdf --pst myarchive.pst --conversations --output C:\exports\myarchive.pdf
 # → C:\exports\myarchive-00001.pdf
 # → C:\exports\myarchive-00002.pdf
@@ -59,14 +59,14 @@ pst2pdf --pst myarchive.pst --conversations --output C:\exports\myarchive.pdf
 ```
 
 **Export attachments alongside conversation PDFs:**
-```powershell
+```shell
 pst2pdf --pst myarchive.pst --conversations --attachments C:\exports\attachments
 # Attachments are prefixed with the conversation number:
 # → C:\exports\attachments\myarchive-00003-photo.jpg
 ```
 
 **Show internal Exchange addresses:**
-```powershell
+```shell
 pst2pdf --pst myarchive.pst --showdetails
 ```
 

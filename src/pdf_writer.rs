@@ -247,6 +247,30 @@ fn render_messages_to_writer(
     }
 }
 
+/// Render a parsed EML file into a PDF and return the raw bytes.
+/// Headers are printed in bold; body in regular font.
+pub fn render_eml_to_pdf(subject: &str, date: &str, from: &str, to: &str, body: &str) -> Vec<u8> {
+    let title = if subject.is_empty() { "email" } else { subject };
+    let mut writer = PageWriter::new(title);
+    let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
+    let bold_font = PdfFontHandle::Builtin(BuiltinFont::HelveticaBold);
+
+    writer.write_line(&format!("Date:    {}", date), &bold_font, FONT_SIZE_PT);
+    writer.write_wrapped(&format!("From:    {}", from), &bold_font, FONT_SIZE_PT);
+    writer.write_wrapped(&format!("To:      {}", to), &bold_font, FONT_SIZE_PT);
+    writer.write_wrapped(&format!("Subject: {}", subject), &bold_font, FONT_SIZE_PT);
+    writer.write_line(&"-".repeat(60), &normal_font, FONT_SIZE_PT);
+
+    if body.is_empty() {
+        writer.write_line("(no body)", &normal_font, FONT_SIZE_PT);
+    } else {
+        writer.write_wrapped(body, &normal_font, FONT_SIZE_PT);
+    }
+
+    let doc = writer.finalize();
+    doc.save(&PdfSaveOptions::default(), &mut Vec::new())
+}
+
 pub fn write_pdf(threads: &[ConversationThread], output_path: &Path, show_details: bool) -> Result<()> {
     let title = output_path
         .file_stem()
