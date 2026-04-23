@@ -7,7 +7,7 @@ use printpdf::{
     TextItem,
 };
 
-use crate::models::ConversationThread;
+use crate::models::{ConversationThread, EmailMessage};
 
 const PAGE_WIDTH_MM: f32 = 210.0;
 const PAGE_HEIGHT_MM: f32 = 297.0;
@@ -238,7 +238,6 @@ fn render_messages_to_writer(
     writer: &mut PageWriter,
     messages: &[crate::models::EmailMessage],
     normal_font: &PdfFontHandle,
-    bold_font: &PdfFontHandle,
     show_details: bool,
 ) {
     for msg in messages {
@@ -276,12 +275,30 @@ fn render_messages_to_writer(
             to_parts.join(", ")
         };
 
-        writer.write_line(&format!("{}Date:    {}", indent, date_str), bold_font, FONT_SIZE_PT);
-        writer.write_line(&format!("{}From:    {}", indent, from_str), bold_font, FONT_SIZE_PT);
-        writer.write_indented_wrapped(&indent, &format!("To:      {}", to_str), bold_font, FONT_SIZE_PT);
+        writer.write_line(&format!("{}Date:    {}", indent, date_str), normal_font, FONT_SIZE_PT);
+        writer.write_line(&format!("{}From:    {}", indent, from_str), normal_font, FONT_SIZE_PT);
+        writer.write_indented_wrapped(&indent, &format!("To:      {}", to_str), normal_font, FONT_SIZE_PT);
         writer.write_line(
             &format!("{}Subject: {}", indent, subject_display(&msg.subject)),
-            bold_font,
+            normal_font,
+            FONT_SIZE_PT,
+        );
+        writer.write_line(
+            &format!(
+                "{}Message-ID: {}",
+                indent,
+                msg.message_id.as_deref().unwrap_or("(none)")
+            ),
+            normal_font,
+            FONT_SIZE_PT,
+        );
+        writer.write_line(
+            &format!(
+                "{}Reply-To-ID: {}",
+                indent,
+                msg.in_reply_to.as_deref().unwrap_or("(none)")
+            ),
+            normal_font,
             FONT_SIZE_PT,
         );
         writer.write_line(&format!("{}{}", indent, "-".repeat(60)), normal_font, FONT_SIZE_PT);
@@ -295,17 +312,16 @@ fn render_messages_to_writer(
 }
 
 /// Render a parsed EML file into a PDF and return the raw bytes.
-/// Headers are printed in bold; body in regular font.
+/// All text uses the regular font.
 pub fn render_eml_to_pdf(subject: &str, date: &str, from: &str, to: &str, body: &str) -> Vec<u8> {
     let title = if subject.is_empty() { "email" } else { subject };
     let mut writer = PageWriter::new(title);
     let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
-    let bold_font = PdfFontHandle::Builtin(BuiltinFont::HelveticaBold);
 
-    writer.write_line(&format!("Date:    {}", date), &bold_font, FONT_SIZE_PT);
-    writer.write_wrapped(&format!("From:    {}", from), &bold_font, FONT_SIZE_PT);
-    writer.write_wrapped(&format!("To:      {}", to), &bold_font, FONT_SIZE_PT);
-    writer.write_wrapped(&format!("Subject: {}", subject), &bold_font, FONT_SIZE_PT);
+    writer.write_line(&format!("Date:    {}", date), &normal_font, FONT_SIZE_PT);
+    writer.write_wrapped(&format!("From:    {}", from), &normal_font, FONT_SIZE_PT);
+    writer.write_wrapped(&format!("To:      {}", to), &normal_font, FONT_SIZE_PT);
+    writer.write_wrapped(&format!("Subject: {}", subject), &normal_font, FONT_SIZE_PT);
     writer.write_line(&"-".repeat(60), &normal_font, FONT_SIZE_PT);
 
     if body.is_empty() {
@@ -326,7 +342,6 @@ pub fn write_pdf(threads: &[ConversationThread], output_path: &Path, show_detail
 
     let mut writer = PageWriter::new(title);
     let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
-    let bold_font = PdfFontHandle::Builtin(BuiltinFont::HelveticaBold);
 
     for (i, thread) in threads.iter().enumerate() {
         if i > 0 {
@@ -340,14 +355,14 @@ pub fn write_pdf(threads: &[ConversationThread], output_path: &Path, show_detail
             thread.messages.len(),
             if thread.messages.len() == 1 { "" } else { "s" }
         );
-        writer.write_line(&header, &bold_font, HEADER_SIZE_PT);
+        writer.write_line(&header, &normal_font, HEADER_SIZE_PT);
         writer.write_line(
             &"=".repeat(header.len().min(MAX_CHARS_PER_LINE)),
             &normal_font,
             FONT_SIZE_PT,
         );
 
-        render_messages_to_writer(&mut writer, &thread.messages, &normal_font, &bold_font, show_details);
+        render_messages_to_writer(&mut writer, &thread.messages, &normal_font, show_details);
     }
 
     let doc = writer.finalize();
@@ -370,14 +385,57 @@ pub fn write_conversation_pdfs(
         .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
 
     let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
-    let bold_font = PdfFontHandle::Builtin(BuiltinFont::HelveticaBold);
 
     for (i, thread) in threads.iter().enumerate() {
         let filename = format!("{}-{:05}.pdf", stem, i + 1);
         let path = output_dir.join(&filename);
 
         let mut writer = PageWriter::new(&thread.display_subject);
-        render_messages_to_writer(&mut writer, &thread.messages, &normal_font, &bold_font, show_details);
+        render_messages_to_writer(&mut writer, &thread.messages, &normal_font, show_details);
+
+        let doc = writer.finalize();
+        let bytes = doc.save(&PdfSaveOptions::default(), &mut Vec::new());
+        std::fs::write(&path, &bytes)
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Write one PDF for all messages in flat order.
+pub fn write_flat_pdf(messages: &[EmailMessage], output_path: &Path, show_details: bool) -> Result<()> {
+    let title = output_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("pst2pdf");
+
+    let mut writer = PageWriter::new(title);
+    let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
+    render_messages_to_writer(&mut writer, messages, &normal_font, show_details);
+
+    let doc = writer.finalize();
+    let bytes = doc.save(&PdfSaveOptions::default(), &mut Vec::new());
+    std::fs::write(output_path, &bytes)?;
+    Ok(())
+}
+
+/// Write one PDF per email in flat order.
+pub fn write_flat_pdfs(
+    messages: &[EmailMessage],
+    output_dir: &Path,
+    stem: &str,
+    show_details: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
+
+    let normal_font = PdfFontHandle::Builtin(BuiltinFont::Helvetica);
+
+    for (i, msg) in messages.iter().enumerate() {
+        let filename = format!("{}-{:05}.pdf", stem, i + 1);
+        let path = output_dir.join(&filename);
+
+        let mut writer = PageWriter::new(&msg.subject);
+        render_messages_to_writer(&mut writer, std::slice::from_ref(msg), &normal_font, show_details);
 
         let doc = writer.finalize();
         let bytes = doc.save(&PdfSaveOptions::default(), &mut Vec::new());
@@ -433,6 +491,16 @@ fn render_messages_to_text(
         out.push_str(&format!("{}From:    {}\n", indent, from_str));
         out.push_str(&format!("{}To:      {}\n", indent, to_str));
         out.push_str(&format!("{}Subject: {}\n", indent, subject_display(&msg.subject)));
+        out.push_str(&format!(
+            "{}Message-ID: {}\n",
+            indent,
+            msg.message_id.as_deref().unwrap_or("(none)")
+        ));
+        out.push_str(&format!(
+            "{}Reply-To-ID: {}\n",
+            indent,
+            msg.in_reply_to.as_deref().unwrap_or("(none)")
+        ));
         out.push_str(&format!("{}{}", indent, "-".repeat(60)));
         out.push('\n');
 
@@ -479,6 +547,16 @@ pub fn write_text(threads: &[ConversationThread], output_path: &Path, show_detai
     Ok(())
 }
 
+/// Write one UTF-8 plain-text file for all messages in flat order.
+pub fn write_flat_text(messages: &[EmailMessage], output_path: &Path, show_details: bool) -> Result<()> {
+    let mut out = String::new();
+    render_messages_to_text(&mut out, messages, show_details);
+
+    std::fs::write(output_path, out.as_bytes())
+        .with_context(|| format!("Failed to write {}", output_path.display()))?;
+    Ok(())
+}
+
 /// Write one UTF-8 plain-text file per conversation thread.
 /// Files are named `<stem>-00001.txt`, `<stem>-00002.txt`, etc.
 pub fn write_conversation_texts(
@@ -496,6 +574,29 @@ pub fn write_conversation_texts(
 
         let mut out = String::new();
         render_messages_to_text(&mut out, &thread.messages, show_details);
+
+        std::fs::write(&path, out.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Write one UTF-8 plain-text file per email in flat order.
+pub fn write_flat_texts(
+    messages: &[EmailMessage],
+    output_dir: &Path,
+    stem: &str,
+    show_details: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
+
+    for (i, msg) in messages.iter().enumerate() {
+        let filename = format!("{}-{:05}.txt", stem, i + 1);
+        let path = output_dir.join(&filename);
+
+        let mut out = String::new();
+        render_messages_to_text(&mut out, std::slice::from_ref(msg), show_details);
 
         std::fs::write(&path, out.as_bytes())
             .with_context(|| format!("Failed to write {}", path.display()))?;

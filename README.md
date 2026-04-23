@@ -34,7 +34,8 @@ pst2pdf --pst <FILE> [OPTIONS]
 |------|-------------|
 | `--pst <FILE>` | Path to the PST file to convert *(required)* |
 | `--output <FILE>` | Output PDF path (default: same name as PST with `.pdf` extension) |
-| `--conversations` | Write one PDF per conversation thread instead of one combined PDF |
+| `--by <flat,conversation>` | Choose flat email order or conversation grouping. Default: `conversation` |
+| `--into <one,individual>` | Write one combined file or one file per email/conversation. Default: `one` |
 | `--attachments <DIR>` | Extract attachments into this folder |
 | `--showdetails` | Show raw Exchange DN addresses in From/To fields |
 | `--as <text,pdf,none>` | Choose output format(s): `pdf`, `text`, `none`, or combinations like `pdf,text`. Default: `pdf` |
@@ -77,15 +78,22 @@ pst2pdf --pst myarchive.pst --as none --attachments C:\exports\attachments
 
 **One PDF per conversation thread:**
 ```shell
-pst2pdf --pst myarchive.pst --conversations --output C:\exports\myarchive.pdf
+pst2pdf --pst myarchive.pst --by conversation --into individual --output C:\exports\myarchive.pdf
 # → C:\exports\myarchive-00001.pdf
 # → C:\exports\myarchive-00002.pdf
 # → ...
 ```
 
+**One PDF per email in flat order:**
+```shell
+pst2pdf --pst myarchive.pst --by flat --into individual --output C:\exports\emails
+# → C:\exports\emails\myarchive-00001.pdf
+# → C:\exports\emails\myarchive-00002.pdf
+```
+
 **Export attachments alongside conversation PDFs:**
 ```shell
-pst2pdf --pst myarchive.pst --conversations --attachments C:\exports\attachments
+pst2pdf --pst myarchive.pst --by conversation --into individual --attachments C:\exports\attachments
 # Attachments are prefixed with the conversation number:
 # → C:\exports\attachments\myarchive-00003-photo.jpg
 ```
