@@ -896,7 +896,7 @@ fn try_zip_find_eml(bytes: &[u8]) -> Option<Vec<u8>> {
     let cursor = std::io::Cursor::new(bytes);
     let mut archive = zip::ZipArchive::new(cursor).ok()?;
     for i in 0..archive.len() {
-        let mut file = match archive.by_index(i) {
+        let file = match archive.by_index(i) {
             Ok(f) => f,
             Err(_) => continue,
         };

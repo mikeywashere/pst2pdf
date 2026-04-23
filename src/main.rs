@@ -109,11 +109,17 @@ fn main() -> Result<()> {
         // Resolve base output path (without extension).
         let base_path = match args.output {
             Some(ref p) if p.is_dir() => p.join(&pst_stem),
-            Some(ref p) => {
-                // Strip any .pdf/.txt extension the user may have typed.
-                let stripped = p.with_extension("");
-                stripped
-            }
+            Some(ref p) => p
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .map(|parent| {
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(&pst_stem);
+                    parent.join(stem)
+                })
+                .unwrap_or_else(|| {
+                    let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or(&pst_stem);
+                    PathBuf::from(stem)
+                }),
             None => pst_dir.join(&pst_stem),
         };
 

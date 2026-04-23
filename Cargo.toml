@@ -16,3 +16,6 @@ chrono = "0.4"
 eml-codec = "0"
 flate2 = "1"
 zip = "2"
+
+[patch.crates-io]
+outlook-pst = { path = "vendor/outlook-pst" }
