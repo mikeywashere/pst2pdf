@@ -6,7 +6,7 @@ A Rust command-line tool that converts an Outlook PST email archive into PDF. It
 
 - Recursively traverses all PST folders (Inbox, Sent Items, custom folders, etc.)
 - Groups messages into conversation threads by normalized subject
-- Outputs a single combined PDF, plain text, **or** both
+- Outputs a single combined PDF, plain text, **both**, or attachment-only mode
 - Exports attachments to a folder, with optional per-conversation numbering
 - Verbose mode for step-by-step processing logs
 - Attachment extension filters with include and exclude rules
@@ -36,7 +36,7 @@ pst2pdf --pst <FILE> [OPTIONS]
 | `--conversations` | Write one PDF per conversation thread instead of one combined PDF |
 | `--attachments <DIR>` | Extract attachments into this folder |
 | `--showdetails` | Show raw Exchange DN addresses in From/To fields |
-| `--as <text,pdf>` | Choose output format(s): `pdf`, `text`, or both (comma-separated). Default: `pdf` |
+| `--as <text,pdf,none>` | Choose output format(s): `pdf`, `text`, `none`, or combinations like `pdf,text`. Default: `pdf` |
 | `--verbose` | Print detailed progress logs while reading messages and attachments |
 | `--filter <EXTS>` | Filter attachment extensions. Use `png,eml` to include only those, or `-emz,-bmp` to exclude those |
 
@@ -66,6 +66,11 @@ pst2pdf --pst myarchive.pst --as text
 pst2pdf --pst myarchive.pst --as pdf,text
 # → myarchive.pdf
 # → myarchive.txt
+```
+
+**Extract attachments only:**
+```shell
+pst2pdf --pst myarchive.pst --as none --attachments C:\exports\attachments
 ```
 
 **One PDF per conversation thread:**

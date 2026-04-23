@@ -22,6 +22,7 @@ Examples:\n\
   pst2pdf --pst archive.pst\n\
   pst2pdf --pst archive.pst --as text\n\
   pst2pdf --pst archive.pst --as pdf,text\n\
+  pst2pdf --pst archive.pst --as none --attachments ./attachments\n\
   pst2pdf --pst archive.pst --verbose\n\
   pst2pdf --pst archive.pst --filter png,eml,txt,msg\n\
   pst2pdf --pst archive.pst --conversations --output ./out --as text\n\
@@ -51,9 +52,9 @@ struct Args {
     #[arg(long)]
     conversations: bool,
 
-    /// Output format(s): pdf, text, or both (comma-separated). Default: pdf.
+    /// Output format(s): pdf, text, both, or none (comma-separated). Default: pdf.
     ///
-    /// Examples: --as pdf  --as text  --as pdf,text
+    /// Examples: --as pdf  --as text  --as pdf,text  --as none
     #[arg(long = "as", value_name = "FORMAT", value_delimiter = ',', default_value = "pdf")]
     output_format: Vec<String>,
 
@@ -70,21 +71,71 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Validate --as values
-    let want_pdf = args.output_format.iter().any(|f| f.eq_ignore_ascii_case("pdf"));
-    let want_text = args.output_format.iter().any(|f| f.eq_ignore_ascii_case("text"));
-    if !want_pdf && !want_text {
-        eprintln!("error: --as accepts 'pdf' and/or 'text' (e.g. --as pdf,text)");
-        std::process::exit(1);
-    }
-    let attachment_filter = pst_reader::AttachmentFilter::from_specs(&args.filter);
-
     // Derive the stem (base filename without extension) from the PST file.
     let pst_stem = args.pst
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("output")
         .to_string();
+
+    // Validate --as values
+    let want_none = args.output_format.iter().any(|f| f.eq_ignore_ascii_case("none"));
+    let want_pdf = args.output_format.iter().any(|f| f.eq_ignore_ascii_case("pdf"));
+    let want_text = args.output_format.iter().any(|f| f.eq_ignore_ascii_case("text"));
+    if want_none {
+        if args.output_format.len() != 1 {
+            eprintln!("error: --as none cannot be combined with pdf or text");
+            std::process::exit(1);
+        }
+        if args.attachments.is_none() {
+            eprintln!("error: --as none requires --attachments");
+            std::process::exit(1);
+        }
+    } else if !want_pdf && !want_text {
+        eprintln!("error: --as accepts 'pdf' and/or 'text' (e.g. --as pdf,text)");
+        std::process::exit(1);
+    }
+    let attachment_filter = pst_reader::AttachmentFilter::from_specs(&args.filter);
+
+    if want_none {
+        if let Some(att_dir) = &args.attachments {
+            if args.conversations {
+                println!("Reading PST: {}", args.pst.display());
+                let messages = pst_reader::read_messages(&args.pst, args.verbose)
+                    .with_context(|| format!("Failed to read {}", args.pst.display()))?;
+
+                println!("Found {} messages", messages.len());
+                let threads = thread_grouper::group_by_thread(messages, args.verbose);
+                println!("Grouped into {} conversation threads", threads.len());
+
+                println!("Extracting attachments to: {}", att_dir.display());
+                let count = pst_reader::save_attachments_for_threads(
+                    &args.pst,
+                    att_dir,
+                    &threads,
+                    &pst_stem,
+                    &attachment_filter,
+                    args.verbose,
+                )
+                .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
+                println!("Saved {} attachment(s).", count);
+            } else {
+                println!("Reading PST: {}", args.pst.display());
+                println!("Extracting attachments to: {}", att_dir.display());
+                let count = pst_reader::save_attachments(
+                    &args.pst,
+                    att_dir,
+                    &attachment_filter,
+                    args.verbose,
+                )
+                .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
+                println!("Saved {} attachment(s).", count);
+            }
+        }
+
+        println!("Done.");
+        return Ok(());
+    }
 
     // Default output directory is the PST file's own directory.
     let pst_dir = args.pst
