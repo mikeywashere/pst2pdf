@@ -41,8 +41,32 @@ fn pt_to_mm(pt: f32) -> f32 {
 // Strip non-Latin1 characters since built-in PDF fonts use Windows-1252
 fn sanitize_text(s: &str) -> String {
     s.chars()
-        .map(|c| if c as u32 > 255 || (c as u32 > 127 && (c as u32) < 160) { '?' } else { c })
+        .map(|c| {
+            if c.is_control() || c as u32 > 255 || ((c as u32) > 127 && (c as u32) < 160) {
+                '?'
+            } else {
+                c
+            }
+        })
         .collect()
+}
+
+fn subject_display(subject: &str) -> &str {
+    if subject.trim().is_empty() {
+        "(no subject)"
+    } else {
+        subject
+    }
+}
+
+fn reply_indent(depth: usize, tabs: bool) -> String {
+    if depth == 0 {
+        String::new()
+    } else if tabs {
+        "\t".repeat(depth)
+    } else {
+        "    ".repeat(depth)
+    }
 }
 
 fn is_exchange_dn(s: &str) -> bool {
@@ -184,6 +208,24 @@ impl PageWriter {
         }
     }
 
+    fn write_indented_wrapped(
+        &mut self,
+        indent: &str,
+        text: &str,
+        font: &PdfFontHandle,
+        size: f32,
+    ) {
+        let max_chars = MAX_CHARS_PER_LINE.saturating_sub(indent.len()).max(20);
+        let lines = word_wrap(text, max_chars);
+        for line in lines {
+            if line.is_empty() {
+                self.write_line("", font, size);
+            } else {
+                self.write_line(&format!("{}{}", indent, line), font, size);
+            }
+        }
+    }
+
     fn finalize(mut self) -> PdfDocument {
         if !self.ops.is_empty() || self.doc.pages.is_empty() {
             self.flush_page();
@@ -201,6 +243,7 @@ fn render_messages_to_writer(
 ) {
     for msg in messages {
         writer.write_blank_line(normal_font, FONT_SIZE_PT);
+        let indent = reply_indent(msg.reply_depth, false);
 
         let date_str = msg
             .date
@@ -233,16 +276,20 @@ fn render_messages_to_writer(
             to_parts.join(", ")
         };
 
-        writer.write_line(&format!("Date:    {}", date_str), bold_font, FONT_SIZE_PT);
-        writer.write_line(&format!("From:    {}", from_str), bold_font, FONT_SIZE_PT);
-        writer.write_wrapped(&format!("To:      {}", to_str), bold_font, FONT_SIZE_PT);
-        writer.write_line(&format!("Subject: {}", msg.subject), bold_font, FONT_SIZE_PT);
-        writer.write_line(&"-".repeat(60), normal_font, FONT_SIZE_PT);
+        writer.write_line(&format!("{}Date:    {}", indent, date_str), bold_font, FONT_SIZE_PT);
+        writer.write_line(&format!("{}From:    {}", indent, from_str), bold_font, FONT_SIZE_PT);
+        writer.write_indented_wrapped(&indent, &format!("To:      {}", to_str), bold_font, FONT_SIZE_PT);
+        writer.write_line(
+            &format!("{}Subject: {}", indent, subject_display(&msg.subject)),
+            bold_font,
+            FONT_SIZE_PT,
+        );
+        writer.write_line(&format!("{}{}", indent, "-".repeat(60)), normal_font, FONT_SIZE_PT);
 
         if msg.body.is_empty() {
-            writer.write_line("(no body)", normal_font, FONT_SIZE_PT);
+            writer.write_line(&format!("{}(no body)", indent), normal_font, FONT_SIZE_PT);
         } else {
-            writer.write_wrapped(&msg.body, normal_font, FONT_SIZE_PT);
+            writer.write_indented_wrapped(&indent, &msg.body, normal_font, FONT_SIZE_PT);
         }
     }
 }
@@ -349,6 +396,7 @@ fn render_messages_to_text(
 ) {
     for msg in messages {
         out.push('\n');
+        let indent = reply_indent(msg.reply_depth, true);
 
         let date_str = msg
             .date
@@ -381,18 +429,23 @@ fn render_messages_to_text(
             to_parts.join(", ")
         };
 
-        out.push_str(&format!("Date:    {}\n", date_str));
-        out.push_str(&format!("From:    {}\n", from_str));
-        out.push_str(&format!("To:      {}\n", to_str));
-        out.push_str(&format!("Subject: {}\n", msg.subject));
-        out.push_str(&"-".repeat(60));
+        out.push_str(&format!("{}Date:    {}\n", indent, date_str));
+        out.push_str(&format!("{}From:    {}\n", indent, from_str));
+        out.push_str(&format!("{}To:      {}\n", indent, to_str));
+        out.push_str(&format!("{}Subject: {}\n", indent, subject_display(&msg.subject)));
+        out.push_str(&format!("{}{}", indent, "-".repeat(60)));
         out.push('\n');
 
         if msg.body.is_empty() {
-            out.push_str("(no body)\n");
+            out.push_str(&format!("{}(no body)\n", indent));
         } else {
-            out.push_str(&msg.body);
-            if !msg.body.ends_with('\n') {
+            for line in msg.body.lines() {
+                out.push_str(&indent);
+                out.push_str(line);
+                out.push('\n');
+            }
+            if msg.body.is_empty() {
+                out.push_str(&indent);
                 out.push('\n');
             }
         }
@@ -494,6 +547,11 @@ mod tests {
         // U+0080–U+009F are C1 controls, not printable in Windows-1252
         let s: String = "\u{0082}".to_string();
         assert_eq!(sanitize_text(&s), "?");
+    }
+
+    #[test]
+    fn sanitize_ascii_control_chars_replaced() {
+        assert_eq!(sanitize_text("\u{0001}\u{0002}"), "??");
     }
 
     #[test]

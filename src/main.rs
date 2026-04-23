@@ -3,7 +3,7 @@ mod pdf_writer;
 mod pst_reader;
 mod thread_grouper;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -11,6 +11,14 @@ use clap::Parser;
 fn is_dir_like(path: &PathBuf) -> bool {
     let s = path.to_string_lossy();
     path.is_dir() || s.ends_with('\\') || s.ends_with('/')
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
+    }
+    Ok(())
 }
 
 #[derive(Parser)]
@@ -25,6 +33,7 @@ Examples:\n\
   pst2pdf --pst archive.pst --as none --attachments ./attachments\n\
   pst2pdf --pst archive.pst --verbose\n\
   pst2pdf --pst archive.pst --filter png,eml,txt,msg\n\
+  pst2pdf --pst archive.pst --attachments ./attachments --unzip\n\
   pst2pdf --pst archive.pst --conversations --output ./out --as text\n\
   pst2pdf --pst archive.pst --attachments ./attachments")]
 #[command(arg_required_else_help = true)]
@@ -66,6 +75,10 @@ struct Args {
     /// extensions, or negative values to exclude them.
     #[arg(long, value_name = "EXT", value_delimiter = ',', allow_hyphen_values = true)]
     filter: Vec<String>,
+
+    /// Recursively unpack compressed attachments into subfolders while keeping the originals.
+    #[arg(long)]
+    unzip: bool,
 }
 
 fn main() -> Result<()> {
@@ -115,6 +128,7 @@ fn main() -> Result<()> {
                     &threads,
                     &pst_stem,
                     &attachment_filter,
+                    args.unzip,
                     args.verbose,
                 )
                 .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
@@ -126,6 +140,7 @@ fn main() -> Result<()> {
                     &args.pst,
                     att_dir,
                     &attachment_filter,
+                    args.unzip,
                     args.verbose,
                 )
                 .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
@@ -175,6 +190,7 @@ fn main() -> Result<()> {
                 &threads,
                 &pst_stem,
                 &attachment_filter,
+                args.unzip,
                 args.verbose,
             )
                 .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
@@ -201,6 +217,7 @@ fn main() -> Result<()> {
         if want_pdf {
             let pdf_path = base_path.with_extension("pdf");
             println!("Writing PDF: {}", pdf_path.display());
+            ensure_parent_dir(&pdf_path)?;
             pdf_writer::write_pdf(&threads, &pdf_path, args.showdetails)
                 .with_context(|| format!("Failed to write {}", pdf_path.display()))?;
         }
@@ -208,13 +225,20 @@ fn main() -> Result<()> {
         if want_text {
             let txt_path = base_path.with_extension("txt");
             println!("Writing text: {}", txt_path.display());
+            ensure_parent_dir(&txt_path)?;
             pdf_writer::write_text(&threads, &txt_path, args.showdetails)
                 .with_context(|| format!("Failed to write {}", txt_path.display()))?;
         }
 
         if let Some(att_dir) = &args.attachments {
             println!("Extracting attachments to: {}", att_dir.display());
-            let count = pst_reader::save_attachments(&args.pst, att_dir, &attachment_filter, args.verbose)
+            let count = pst_reader::save_attachments(
+                &args.pst,
+                att_dir,
+                &attachment_filter,
+                args.unzip,
+                args.verbose,
+            )
                 .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
             println!("Saved {} attachment(s).", count);
         }

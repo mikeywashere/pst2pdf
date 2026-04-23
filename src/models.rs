@@ -9,6 +9,10 @@ pub struct EmailMessage {
     pub subject: String,
     pub body: String,
     pub normalized_subject: String,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub reply_depth: usize,
     /// PST node ID — used to correlate messages with their attachments
     pub node_id: u32,
 }

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::{Context, Result};
@@ -26,6 +26,7 @@ const PR_MESSAGE_DELIVERY_TIME: u16 = 0x0E06;
 const PR_CLIENT_SUBMIT_TIME: u16 = 0x0039;
 const PR_BODY: u16 = 0x1000;
 const PR_HTML: u16 = 0x1013;
+const PR_TRANSPORT_MESSAGE_HEADERS: u16 = 0x007D;
 const PR_DISPLAY_NAME: u16 = 0x3001;
 const PR_EMAIL_ADDRESS: u16 = 0x3003;
 const PR_SMTP_ADDRESS: u16 = 0x39FE;
@@ -92,6 +93,86 @@ fn prop_to_string(pv: &PropertyValue) -> Option<String> {
         PropertyValue::Unicode(s) => Some(s.to_string()),
         _ => None,
     }
+}
+
+fn clean_subject_text(subject: &str) -> String {
+    subject
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+fn normalize_header_id(value: &str) -> String {
+    value.trim().trim_matches('<').trim_matches('>').trim().to_string()
+}
+
+fn extract_header_ids(value: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    let mut current = String::new();
+    let mut in_id = false;
+
+    for ch in value.chars() {
+        match ch {
+            '<' => {
+                in_id = true;
+                current.clear();
+            }
+            '>' if in_id => {
+                let id = normalize_header_id(&current);
+                if !id.is_empty() {
+                    ids.push(id);
+                }
+                in_id = false;
+                current.clear();
+            }
+            _ if in_id => current.push(ch),
+            _ => {}
+        }
+    }
+
+    if ids.is_empty() {
+        for token in value.split_whitespace() {
+            let id = normalize_header_id(token);
+            if !id.is_empty() {
+                ids.push(id);
+            }
+        }
+    }
+
+    ids
+}
+
+fn parse_transport_headers(headers: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut current_name: Option<String> = None;
+    let mut current_value = String::new();
+
+    for line in headers.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if !current_value.is_empty() {
+                current_value.push(' ');
+            }
+            current_value.push_str(line.trim());
+            continue;
+        }
+
+        if let Some((name, value)) = line.split_once(':') {
+            if let Some(prev_name) = current_name.take() {
+                map.insert(prev_name, current_value.trim().to_string());
+            }
+            current_name = Some(name.trim().to_lowercase());
+            current_value.clear();
+            current_value.push_str(value.trim());
+        }
+    }
+
+    if let Some(prev_name) = current_name {
+        map.insert(prev_name, current_value.trim().to_string());
+    }
+
+    map
 }
 
 fn prop_to_time(pv: &PropertyValue) -> Option<DateTime<Utc>> {
@@ -277,6 +358,7 @@ fn extract_message(msg: &Rc<dyn Message>, node_id: u32, verbose: bool) -> Result
     let subject = props
         .get(PR_SUBJECT)
         .and_then(prop_to_string)
+        .map(|s| clean_subject_text(&s))
         .unwrap_or_default();
 
     if verbose {
@@ -319,6 +401,29 @@ fn extract_message(msg: &Rc<dyn Message>, node_id: u32, verbose: bool) -> Result
     let to_recipients = extract_recipients(msg);
 
     let normalized_subject = normalize_subject(&subject);
+    let headers = props
+        .get(PR_TRANSPORT_MESSAGE_HEADERS)
+        .and_then(prop_to_string)
+        .unwrap_or_default();
+    let header_map = if headers.is_empty() {
+        HashMap::new()
+    } else {
+        parse_transport_headers(&headers)
+    };
+    let message_id = header_map
+        .get("message-id")
+        .or_else(|| header_map.get("messageid"))
+        .map(|v| normalize_header_id(v))
+        .filter(|s| !s.is_empty());
+    let in_reply_to = header_map
+        .get("in-reply-to")
+        .or_else(|| header_map.get("inreplyto"))
+        .map(|v| normalize_header_id(v))
+        .filter(|s| !s.is_empty());
+    let references = header_map
+        .get("references")
+        .map(|v| extract_header_ids(v))
+        .unwrap_or_default();
 
     Ok(EmailMessage {
         date,
@@ -328,6 +433,10 @@ fn extract_message(msg: &Rc<dyn Message>, node_id: u32, verbose: bool) -> Result
         subject,
         body,
         normalized_subject,
+        message_id,
+        in_reply_to,
+        references,
+        reply_depth: 0,
         node_id,
     })
 }
@@ -338,6 +447,7 @@ pub fn save_attachments(
     pst_path: &Path,
     output_dir: &Path,
     filter: &AttachmentFilter,
+    unzip: bool,
     verbose: bool,
 ) -> Result<usize> {
     std::fs::create_dir_all(output_dir)
@@ -361,6 +471,7 @@ pub fn save_attachments(
                     &mut used_names,
                     "",
                     filter,
+                    unzip,
                     verbose,
                 );
             }
@@ -384,6 +495,7 @@ pub fn save_attachments(
                 &mut used_names,
                 "",
                 filter,
+                unzip,
                 verbose,
             );
         }
@@ -400,6 +512,7 @@ pub fn save_attachments_for_threads(
     threads: &[crate::models::ConversationThread],
     stem: &str,
     filter: &AttachmentFilter,
+    unzip: bool,
     verbose: bool,
 ) -> Result<usize> {
     std::fs::create_dir_all(output_dir)
@@ -432,6 +545,7 @@ pub fn save_attachments_for_threads(
                         &mut used_names,
                         &prefix,
                         filter,
+                        unzip,
                         verbose,
                     );
                 }
@@ -458,6 +572,7 @@ pub fn save_attachments_for_threads(
                     &mut used_names,
                     &prefix,
                     filter,
+                    unzip,
                     verbose,
                 );
             }
@@ -525,6 +640,7 @@ fn save_unicode_message_attachments(
     used_names: &mut HashSet<String>,
     prefix: &str,
     filter: &AttachmentFilter,
+    unzip: bool,
     verbose: bool,
 ) -> usize {
     let table = match msg.attachment_table() {
@@ -550,6 +666,7 @@ fn save_unicode_message_attachments(
             used_names,
             prefix,
             filter,
+            unzip,
             verbose,
         ) {
             count += 1;
@@ -565,6 +682,7 @@ fn save_ansi_message_attachments(
     used_names: &mut HashSet<String>,
     prefix: &str,
     filter: &AttachmentFilter,
+    unzip: bool,
     verbose: bool,
 ) -> usize {
     let table = match msg.attachment_table() {
@@ -588,6 +706,7 @@ fn save_ansi_message_attachments(
             used_names,
             prefix,
             filter,
+            unzip,
             verbose,
         ) {
             count += 1;
@@ -603,6 +722,7 @@ fn write_attachment(
     used_names: &mut HashSet<String>,
     prefix: &str,
     filter: &AttachmentFilter,
+    unzip: bool,
     verbose: bool,
 ) -> bool {
     let raw_name = props
@@ -615,13 +735,6 @@ fn write_attachment(
         eprintln!("processing attachment {}", raw_name);
     }
 
-    if !filter.allows_name(&raw_name) {
-        if verbose {
-            eprintln!("skipping attachment {} (filtered)", raw_name);
-        }
-        return false;
-    }
-
     let bytes = match data {
         Some(AttachmentData::Binary(bv)) => bv.buffer(),
         Some(AttachmentData::Message(_)) => {
@@ -632,6 +745,26 @@ fn write_attachment(
         }
         _ => return false,
     };
+
+    if unzip && is_compressed_attachment(&raw_name, bytes) {
+        return write_compressed_attachment(
+            bytes,
+            &raw_name,
+            output_dir,
+            used_names,
+            prefix,
+            filter,
+            unzip,
+            verbose,
+        );
+    }
+
+    if !filter.allows_name(&raw_name) {
+        if verbose {
+            eprintln!("skipping attachment {} (filtered)", raw_name);
+        }
+        return false;
+    }
     if bytes.is_empty() {
         return false;
     }
@@ -819,6 +952,390 @@ fn write_emz_attachment(
     std::fs::write(output_dir.join(&filename), bytes).is_ok()
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum ArchiveKind {
+    Zip,
+    Tar,
+    Gz,
+    TarGz,
+}
+
+fn archive_stem(name: &str) -> String {
+    let lower = name.to_lowercase();
+    if lower.ends_with(".tar.gz") {
+        name[..name.len() - 7].to_string()
+    } else if lower.ends_with(".tgz")
+        || lower.ends_with(".zip")
+        || lower.ends_with(".cab")
+        || lower.ends_with(".tar")
+        || lower.ends_with(".gz")
+    {
+        std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name)
+            .to_string()
+    } else {
+        std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(name)
+            .to_string()
+    }
+}
+
+fn archive_dir_for_file(path: &Path, used_names: &mut HashSet<String>) -> PathBuf {
+    let file_name = path.file_name().and_then(|s| s.to_str()).unwrap_or("attachment.bin");
+    let stem = archive_stem(file_name);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let parent_name = parent.file_name().and_then(|s| s.to_str());
+
+    if parent_name
+        .map(|p| p.eq_ignore_ascii_case(&stem))
+        .unwrap_or(false)
+    {
+        parent.to_path_buf()
+    } else {
+        parent.join(unique_filename(&stem, used_names))
+    }
+}
+
+fn is_zip_magic_path(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut sig = [0u8; 4];
+    file.read_exact(&mut sig).is_ok() && is_zip_magic(&sig)
+}
+
+fn is_gzip_magic_path(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut sig = [0u8; 2];
+    file.read_exact(&mut sig).is_ok() && is_gzip_magic(&sig)
+}
+
+fn is_tar_magic_path(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut buf = [0u8; 512];
+    if file.read_exact(&mut buf).is_err() {
+        return false;
+    }
+    is_tar_magic(&buf)
+}
+
+fn detect_archive_kind(path: &Path) -> Option<ArchiveKind> {
+    detect_archive_kind_hint(path, &[])
+}
+
+fn detect_archive_kind_hint(path: &Path, probe: &[u8]) -> Option<ArchiveKind> {
+    let lower = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    if lower.ends_with(".tar.gz") || lower.ends_with(".tgz") {
+        return Some(ArchiveKind::TarGz);
+    }
+    if lower.ends_with(".tar") || is_tar_magic(probe) || is_tar_magic_path(path) {
+        return Some(ArchiveKind::Tar);
+    }
+    if lower.ends_with(".gz") || is_gzip_magic(probe) || is_gzip_magic_path(path) {
+        return Some(ArchiveKind::Gz);
+    }
+    if lower.ends_with(".zip")
+        || lower.ends_with(".cab")
+        || is_zip_magic(probe)
+        || is_zip_magic_path(path)
+    {
+        return Some(ArchiveKind::Zip);
+    }
+    None
+}
+
+fn is_zip_magic(bytes: &[u8]) -> bool {
+    bytes.len() >= 4
+        && (bytes[..4] == [0x50, 0x4b, 0x03, 0x04]
+            || bytes[..4] == [0x50, 0x4b, 0x05, 0x06]
+            || bytes[..4] == [0x50, 0x4b, 0x07, 0x08])
+}
+
+fn is_gzip_magic(bytes: &[u8]) -> bool {
+    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
+}
+
+fn is_tar_magic(bytes: &[u8]) -> bool {
+    bytes.get(257..262).map(|s| s == b"ustar").unwrap_or(false)
+        || bytes.get(257..263).map(|s| s == b"ustar\0").unwrap_or(false)
+}
+
+fn sanitize_relative_path(path: &Path) -> PathBuf {
+    path.file_name()
+        .and_then(|s| s.to_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("attachment.bin"))
+}
+
+fn write_stream_to_path<R: Read>(
+    mut reader: R,
+    dest: &Path,
+    used_names: &mut HashSet<String>,
+    verbose: bool,
+) -> bool {
+    let parent = dest.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment.bin");
+    let filename = unique_filename(file_name, used_names);
+    let final_dest = parent.join(filename);
+    if let Some(dir) = final_dest.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return false;
+        }
+    }
+    if verbose {
+        eprintln!("writing {}", final_dest.display());
+    }
+    match std::fs::File::create(&final_dest) {
+        Ok(mut out) => std::io::copy(&mut reader, &mut out).is_ok(),
+        Err(_) => false,
+    }
+}
+
+fn write_extracted_file<R: Read>(
+    mut reader: R,
+    relative_path: &Path,
+    extract_dir: &Path,
+    used_names: &mut HashSet<String>,
+    filter: &AttachmentFilter,
+    unzip: bool,
+    verbose: bool,
+) -> bool {
+    let rel = sanitize_relative_path(relative_path);
+    let dest = extract_dir.join(rel);
+    if let Some(parent) = dest.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return false;
+        }
+    }
+
+    let mut probe = [0u8; 512];
+    let probe_len = match reader.read(&mut probe) {
+        Ok(n) => n,
+        Err(_) => return false,
+    };
+    let probe = &probe[..probe_len];
+    let archive_kind = detect_archive_kind_hint(&dest, probe);
+    let chained = std::io::Cursor::new(probe.to_vec()).chain(reader);
+
+    let file_name = dest
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("attachment.bin");
+    let keep_for_recursion = unzip && archive_kind.is_some();
+    if !keep_for_recursion && !filter.allows_name(file_name) {
+        if verbose {
+            eprintln!("skipping attachment {} (filtered)", dest.display());
+        }
+        return false;
+    }
+
+    if !write_stream_to_path(chained, &dest, used_names, verbose) {
+        return false;
+    }
+
+    if unzip && archive_kind.is_some() {
+        let _ = expand_compressed_file(&dest, used_names, filter, unzip, verbose);
+    }
+
+    true
+}
+
+fn extract_zip_file(
+    path: &Path,
+    extract_dir: &Path,
+    used_names: &mut HashSet<String>,
+    filter: &AttachmentFilter,
+    unzip: bool,
+    verbose: bool,
+) -> bool {
+    let file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => return false,
+    };
+
+    for i in 0..archive.len() {
+        let mut entry = match archive.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let rel = match entry.enclosed_name() {
+            Some(p) => p,
+            None => continue,
+        };
+        let dest = extract_dir.join(rel);
+        if entry.is_dir() {
+            let _ = std::fs::create_dir_all(&dest);
+            continue;
+        }
+        let _ = write_extracted_file(&mut entry, &dest, extract_dir, used_names, filter, unzip, verbose);
+    }
+
+    true
+}
+
+fn extract_tar_file<R: Read>(
+    reader: R,
+    extract_dir: &Path,
+    used_names: &mut HashSet<String>,
+    filter: &AttachmentFilter,
+    unzip: bool,
+    verbose: bool,
+) -> bool {
+    let mut archive = tar::Archive::new(reader);
+    let entries = match archive.entries() {
+        Ok(e) => e,
+        Err(_) => return false,
+    };
+
+    for entry in entries {
+        let mut entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let rel = match entry.path() {
+            Ok(p) => sanitize_relative_path(&p),
+            Err(_) => continue,
+        };
+        let dest = extract_dir.join(rel);
+        if entry.header().entry_type().is_dir() {
+            let _ = std::fs::create_dir_all(&dest);
+            continue;
+        }
+        let _ = write_extracted_file(&mut entry, &dest, extract_dir, used_names, filter, unzip, verbose);
+    }
+
+    true
+}
+
+fn extract_gz_single_file(
+    path: &Path,
+    extract_dir: &Path,
+    used_names: &mut HashSet<String>,
+    filter: &AttachmentFilter,
+    unzip: bool,
+    verbose: bool,
+) -> bool {
+    let input = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut dec = flate2::read::GzDecoder::new(input);
+    let out_name = archive_stem(path.file_name().and_then(|s| s.to_str()).unwrap_or("attachment.bin"));
+    let dest = extract_dir.join(out_name);
+    if !write_stream_to_path(&mut dec, &dest, used_names, verbose) {
+        return false;
+    }
+    if unzip {
+        let _ = expand_compressed_file(&dest, used_names, filter, unzip, verbose);
+    }
+    true
+}
+
+fn expand_compressed_file(
+    path: &Path,
+    used_names: &mut HashSet<String>,
+    filter: &AttachmentFilter,
+    unzip: bool,
+    verbose: bool,
+) -> bool {
+    if !unzip {
+        return true;
+    }
+
+    let kind = match detect_archive_kind(path) {
+        Some(kind) => kind,
+        None => return true,
+    };
+
+    let extract_dir = archive_dir_for_file(path, used_names);
+    if std::fs::create_dir_all(&extract_dir).is_err() {
+        return false;
+    }
+
+    if verbose {
+        eprintln!("unpacking {} into {}", path.display(), extract_dir.display());
+    }
+
+    match kind {
+        ArchiveKind::Zip => extract_zip_file(path, &extract_dir, used_names, filter, unzip, verbose),
+        ArchiveKind::Tar => {
+            let input = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+            extract_tar_file(input, &extract_dir, used_names, filter, unzip, verbose)
+        }
+        ArchiveKind::TarGz => {
+            let input = match std::fs::File::open(path) {
+                Ok(f) => f,
+                Err(_) => return false,
+            };
+            let gz = flate2::read::GzDecoder::new(input);
+            extract_tar_file(gz, &extract_dir, used_names, filter, unzip, verbose)
+        }
+        ArchiveKind::Gz => extract_gz_single_file(path, &extract_dir, used_names, filter, unzip, verbose),
+    }
+}
+
+fn write_compressed_attachment(
+    bytes: &[u8],
+    raw_name: &str,
+    output_dir: &Path,
+    used_names: &mut HashSet<String>,
+    prefix: &str,
+    filter: &AttachmentFilter,
+    unzip: bool,
+    verbose: bool,
+) -> bool {
+    let extract_dir = output_dir.join(unique_filename(&archive_stem(raw_name), used_names));
+    if std::fs::create_dir_all(&extract_dir).is_err() {
+        return false;
+    }
+
+    let archive_name = unique_filename(raw_name, used_names);
+    let archive_path = output_dir.join(&archive_name);
+    if verbose {
+        eprintln!("processing compressed attachment {}", raw_name);
+    }
+    if std::fs::write(&archive_path, bytes).is_err() {
+        return false;
+    }
+
+    if unzip {
+        let _ = expand_compressed_file(&archive_path, used_names, filter, unzip, verbose);
+    }
+
+    let _ = prefix; // prefix is only used for flat attachment names.
+    true
+}
+
+fn is_compressed_attachment(raw_name: &str, bytes: &[u8]) -> bool {
+    detect_archive_kind_hint(Path::new(raw_name), bytes).is_some()
+}
+
 /// Convert an `AddressRef` (which doesn't implement Display) to a string.
 fn address_ref_to_string(addr: &eml_codec::imf::address::AddressRef<'_>) -> String {
     use eml_codec::imf::address::AddressRef;
@@ -965,11 +1482,6 @@ fn strip_emf_wrapper(data: &[u8]) -> Option<&[u8]> {
         return None;
     }
     Some(&data[WRAPPER_LEN..])
-}
-
-/// Returns true if the bytes start with the gzip magic number.
-fn is_gzip_magic(bytes: &[u8]) -> bool {
-    bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
 }
 
 /// Decompress only the first ~512 bytes of a gzip stream for heuristic checks.
@@ -1142,6 +1654,12 @@ mod tests {
     #[test]
     fn strip_html_only_tags() {
         assert_eq!(strip_html("<br/><hr/>"), "");
+    }
+
+    #[test]
+    fn clean_subject_text_removes_controls() {
+        assert_eq!(clean_subject_text("\u{0001}\u{0001}"), "");
+        assert_eq!(clean_subject_text("Hello\u{0001} World"), "Hello World");
     }
 
     // ── filetime_to_datetime ─────────────────────────────────────────────────
