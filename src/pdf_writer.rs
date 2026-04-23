@@ -340,6 +340,116 @@ pub fn write_conversation_pdfs(
     Ok(())
 }
 
+// ── Plain-text output ────────────────────────────────────────────────────────
+
+fn render_messages_to_text(
+    out: &mut String,
+    messages: &[crate::models::EmailMessage],
+    show_details: bool,
+) {
+    for msg in messages {
+        out.push('\n');
+
+        let date_str = msg
+            .date
+            .map(|d: DateTime<_>| d.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+            .unwrap_or_else(|| "(unknown date)".to_string());
+
+        let from_str = {
+            let addr_clean = if is_exchange_dn(&msg.from_address) && !show_details {
+                String::new()
+            } else {
+                msg.from_address.clone()
+            };
+            if addr_clean.is_empty() {
+                msg.from_name.clone()
+            } else if msg.from_name.is_empty() {
+                addr_clean
+            } else {
+                format!("{} <{}>", msg.from_name, addr_clean)
+            }
+        };
+
+        let to_parts: Vec<String> = msg
+            .to_recipients
+            .iter()
+            .filter_map(|r| clean_address(r, show_details))
+            .collect();
+        let to_str = if to_parts.is_empty() {
+            "(unknown)".to_string()
+        } else {
+            to_parts.join(", ")
+        };
+
+        out.push_str(&format!("Date:    {}\n", date_str));
+        out.push_str(&format!("From:    {}\n", from_str));
+        out.push_str(&format!("To:      {}\n", to_str));
+        out.push_str(&format!("Subject: {}\n", msg.subject));
+        out.push_str(&"-".repeat(60));
+        out.push('\n');
+
+        if msg.body.is_empty() {
+            out.push_str("(no body)\n");
+        } else {
+            out.push_str(&msg.body);
+            if !msg.body.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+}
+
+/// Write all threads to a single UTF-8 plain-text file.
+pub fn write_text(threads: &[ConversationThread], output_path: &Path, show_details: bool) -> Result<()> {
+    let mut out = String::new();
+
+    for (i, thread) in threads.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let header = format!(
+            "Thread: {} ({} message{})",
+            thread.display_subject,
+            thread.messages.len(),
+            if thread.messages.len() == 1 { "" } else { "s" }
+        );
+        out.push_str(&header);
+        out.push('\n');
+        out.push_str(&"=".repeat(header.len().min(80)));
+        out.push('\n');
+
+        render_messages_to_text(&mut out, &thread.messages, show_details);
+    }
+
+    std::fs::write(output_path, out.as_bytes())
+        .with_context(|| format!("Failed to write {}", output_path.display()))?;
+    Ok(())
+}
+
+/// Write one UTF-8 plain-text file per conversation thread.
+/// Files are named `<stem>-00001.txt`, `<stem>-00002.txt`, etc.
+pub fn write_conversation_texts(
+    threads: &[ConversationThread],
+    output_dir: &Path,
+    stem: &str,
+    show_details: bool,
+) -> Result<()> {
+    std::fs::create_dir_all(output_dir)
+        .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
+
+    for (i, thread) in threads.iter().enumerate() {
+        let filename = format!("{}-{:05}.txt", stem, i + 1);
+        let path = output_dir.join(&filename);
+
+        let mut out = String::new();
+        render_messages_to_text(&mut out, &thread.messages, show_details);
+
+        std::fs::write(&path, out.as_bytes())
+            .with_context(|| format!("Failed to write {}", path.display()))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
