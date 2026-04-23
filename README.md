@@ -1,6 +1,6 @@
 # pst2pdf
 
-A Rust command-line tool that converts an Outlook PST email archive into PDF. It traverses every folder in the PST, groups messages into conversation threads, and writes the result as a readable, formatted PDF.
+A Rust command-line tool that converts an Outlook PST email archive into PDF (or text). It traverses every folder in the PST, groups messages into conversation threads, and writes the result as a readable, formatted PDF.
 
 ## Features
 
