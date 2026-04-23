@@ -8,6 +8,8 @@ A Rust command-line tool that converts an Outlook PST email archive into PDF. It
 - Groups messages into conversation threads by normalized subject
 - Outputs a single combined PDF, plain text, **or** both
 - Exports attachments to a folder, with optional per-conversation numbering
+- Verbose mode for step-by-step processing logs
+- Attachment extension filters with include and exclude rules
 - Filters internal Exchange DN addresses (`/O=…/CN=…`) from display by default
 - Supports both Unicode and ANSI PST formats
 
@@ -35,6 +37,8 @@ pst2pdf --pst <FILE> [OPTIONS]
 | `--attachments <DIR>` | Extract attachments into this folder |
 | `--showdetails` | Show raw Exchange DN addresses in From/To fields |
 | `--as <text,pdf>` | Choose output format(s): `pdf`, `text`, or both (comma-separated). Default: `pdf` |
+| `--verbose` | Print detailed progress logs while reading messages and attachments |
+| `--filter <EXTS>` | Filter attachment extensions. Use `png,eml` to include only those, or `-emz,-bmp` to exclude those |
 
 Running with no arguments prints help.
 
@@ -82,6 +86,17 @@ pst2pdf --pst myarchive.pst --conversations --attachments C:\exports\attachments
 **Show internal Exchange addresses:**
 ```shell
 pst2pdf --pst myarchive.pst --showdetails
+```
+
+**Verbose logging:**
+```shell
+pst2pdf --pst myarchive.pst --verbose
+```
+
+**Filter attachments by extension:**
+```shell
+pst2pdf --pst myarchive.pst --attachments C:\exports\attachments --filter png,eml,txt,msg
+pst2pdf --pst myarchive.pst --attachments C:\exports\attachments --filter -emz,-bmp
 ```
 
 ## Notes

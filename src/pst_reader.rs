@@ -32,6 +32,55 @@ const PR_SMTP_ADDRESS: u16 = 0x39FE;
 const PR_ATTACH_LONG_FILENAME: u16 = 0x3707;
 const PR_ATTACH_FILENAME: u16 = 0x3704;
 
+#[derive(Default)]
+pub struct AttachmentFilter {
+    include: HashSet<String>,
+    exclude: HashSet<String>,
+}
+
+impl AttachmentFilter {
+    pub fn from_specs(specs: &[String]) -> Self {
+        let mut filter = Self::default();
+        for spec in specs {
+            let spec = spec.trim().to_lowercase();
+            if spec.is_empty() {
+                continue;
+            }
+            let (negative, ext) = if let Some(rest) = spec.strip_prefix('-') {
+                (true, rest)
+            } else {
+                (false, spec.as_str())
+            };
+            let ext = ext.strip_prefix('.').unwrap_or(ext).trim();
+            if ext.is_empty() {
+                continue;
+            }
+            if negative {
+                filter.exclude.insert(ext.to_string());
+            } else {
+                filter.include.insert(ext.to_string());
+            }
+        }
+        filter
+    }
+
+    pub fn allows_name(&self, name: &str) -> bool {
+        let ext = Path::new(name)
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        self.allows_ext(&ext)
+    }
+
+    pub fn allows_ext(&self, ext: &str) -> bool {
+        if !self.include.is_empty() && !self.include.contains(ext) {
+            return false;
+        }
+        !self.exclude.contains(ext)
+    }
+}
+
 fn filetime_to_datetime(ft: i64) -> Option<DateTime<Utc>> {
     let unix_secs = (ft / 10_000_000) - 11_644_473_600;
     Utc.timestamp_opt(unix_secs, 0).single()
@@ -74,7 +123,7 @@ fn strip_html(html: &str) -> String {
         .replace("&#39;", "'")
 }
 
-pub fn read_messages(pst_path: &Path) -> Result<Vec<EmailMessage>> {
+pub fn read_messages(pst_path: &Path, verbose: bool) -> Result<Vec<EmailMessage>> {
     let store = outlook_pst::open_store(pst_path)
         .with_context(|| format!("Failed to open PST file: {}", pst_path.display()))?;
 
@@ -90,7 +139,7 @@ pub fn read_messages(pst_path: &Path) -> Result<Vec<EmailMessage>> {
     let mut messages = Vec::new();
     let mut seen: HashSet<u32> = HashSet::new();
 
-    traverse_folder(&store, &root_folder, &mut messages, &mut seen);
+    traverse_folder(&store, &root_folder, &mut messages, &mut seen, verbose);
 
     Ok(messages)
 }
@@ -100,6 +149,7 @@ fn traverse_folder(
     folder: &Rc<dyn Folder>,
     messages: &mut Vec<EmailMessage>,
     seen: &mut HashSet<u32>,
+    verbose: bool,
 ) {
     // Collect subfolder node IDs before dropping the hierarchy table borrow
     let subfolder_node_vals: Vec<u32> = match folder.hierarchy_table() {
@@ -114,7 +164,7 @@ fn traverse_folder(
         let node_id = NodeId::from(node_val);
         if let Ok(entry_id) = store.properties().make_entry_id(node_id) {
             if let Ok(subfolder) = store.open_folder(&entry_id) {
-                traverse_folder(store, &subfolder, messages, seen);
+                traverse_folder(store, &subfolder, messages, seen, verbose);
             }
         }
     }
@@ -139,7 +189,7 @@ fn traverse_folder(
             seen.insert(dedup_key);
 
             if let Ok(msg) = store.open_message(&entry_id, None) {
-                if let Ok(email) = extract_message(&msg, node_val) {
+                if let Ok(email) = extract_message(&msg, node_val, verbose) {
                     messages.push(email);
                 }
             }
@@ -221,13 +271,17 @@ fn extract_recipients(msg: &Rc<dyn Message>) -> Vec<String> {
     recipients
 }
 
-fn extract_message(msg: &Rc<dyn Message>, node_id: u32) -> Result<EmailMessage> {
+fn extract_message(msg: &Rc<dyn Message>, node_id: u32, verbose: bool) -> Result<EmailMessage> {
     let props = msg.properties();
 
     let subject = props
         .get(PR_SUBJECT)
         .and_then(prop_to_string)
         .unwrap_or_default();
+
+    if verbose {
+        eprintln!("reading message {}, {}", node_id, subject);
+    }
 
     let from_name = props
         .get(PR_SENDER_NAME)
@@ -280,7 +334,12 @@ fn extract_message(msg: &Rc<dyn Message>, node_id: u32) -> Result<EmailMessage> 
 
 // ── Attachment extraction ─────────────────────────────────────────────────────
 
-pub fn save_attachments(pst_path: &Path, output_dir: &Path) -> Result<usize> {
+pub fn save_attachments(
+    pst_path: &Path,
+    output_dir: &Path,
+    filter: &AttachmentFilter,
+    verbose: bool,
+) -> Result<usize> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
 
@@ -296,7 +355,14 @@ pub fn save_attachments(pst_path: &Path, output_dir: &Path) -> Result<usize> {
         let mut saved = 0usize;
         for entry_id in &entry_ids {
             if let Ok(msg) = UnicodeMessage::read(store.clone(), entry_id, None) {
-                saved += save_unicode_message_attachments(&msg, output_dir, &mut used_names, "");
+                saved += save_unicode_message_attachments(
+                    &msg,
+                    output_dir,
+                    &mut used_names,
+                    "",
+                    filter,
+                    verbose,
+                );
             }
         }
         return Ok(saved);
@@ -312,7 +378,14 @@ pub fn save_attachments(pst_path: &Path, output_dir: &Path) -> Result<usize> {
     let mut saved = 0usize;
     for entry_id in &entry_ids {
         if let Ok(msg) = AnsiMessage::read(store.clone(), entry_id, None) {
-            saved += save_ansi_message_attachments(&msg, output_dir, &mut used_names, "");
+            saved += save_ansi_message_attachments(
+                &msg,
+                output_dir,
+                &mut used_names,
+                "",
+                filter,
+                verbose,
+            );
         }
     }
     Ok(saved)
@@ -326,6 +399,8 @@ pub fn save_attachments_for_threads(
     output_dir: &Path,
     threads: &[crate::models::ConversationThread],
     stem: &str,
+    filter: &AttachmentFilter,
+    verbose: bool,
 ) -> Result<usize> {
     std::fs::create_dir_all(output_dir)
         .with_context(|| format!("Failed to create directory: {}", output_dir.display()))?;
@@ -351,7 +426,14 @@ pub fn save_attachments_for_threads(
             if let Some(&thread_idx) = nid_to_thread.get(&nid) {
                 let prefix = format!("{}-{:05}-", stem, thread_idx);
                 if let Ok(msg) = UnicodeMessage::read(store.clone(), entry_id, None) {
-                    saved += save_unicode_message_attachments(&msg, output_dir, &mut used_names, &prefix);
+                    saved += save_unicode_message_attachments(
+                        &msg,
+                        output_dir,
+                        &mut used_names,
+                        &prefix,
+                        filter,
+                        verbose,
+                    );
                 }
             }
         }
@@ -370,7 +452,14 @@ pub fn save_attachments_for_threads(
         if let Some(&thread_idx) = nid_to_thread.get(&nid) {
             let prefix = format!("{}-{:05}-", stem, thread_idx);
             if let Ok(msg) = AnsiMessage::read(store.clone(), entry_id, None) {
-                saved += save_ansi_message_attachments(&msg, output_dir, &mut used_names, &prefix);
+                saved += save_ansi_message_attachments(
+                    &msg,
+                    output_dir,
+                    &mut used_names,
+                    &prefix,
+                    filter,
+                    verbose,
+                );
             }
         }
     }
@@ -435,6 +524,8 @@ fn save_unicode_message_attachments(
     output_dir: &Path,
     used_names: &mut HashSet<String>,
     prefix: &str,
+    filter: &AttachmentFilter,
+    verbose: bool,
 ) -> usize {
     let table = match msg.attachment_table() {
         Some(t) => t,
@@ -452,7 +543,15 @@ fn save_unicode_message_attachments(
             Ok(a) => a,
             Err(_) => continue,
         };
-        if write_attachment(attachment.data(), attachment.properties(), output_dir, used_names, prefix) {
+        if write_attachment(
+            attachment.data(),
+            attachment.properties(),
+            output_dir,
+            used_names,
+            prefix,
+            filter,
+            verbose,
+        ) {
             count += 1;
         }
     }
@@ -465,6 +564,8 @@ fn save_ansi_message_attachments(
     output_dir: &Path,
     used_names: &mut HashSet<String>,
     prefix: &str,
+    filter: &AttachmentFilter,
+    verbose: bool,
 ) -> usize {
     let table = match msg.attachment_table() {
         Some(t) => t,
@@ -480,7 +581,15 @@ fn save_ansi_message_attachments(
             Ok(a) => a,
             Err(_) => continue,
         };
-        if write_attachment(attachment.data(), attachment.properties(), output_dir, used_names, prefix) {
+        if write_attachment(
+            attachment.data(),
+            attachment.properties(),
+            output_dir,
+            used_names,
+            prefix,
+            filter,
+            verbose,
+        ) {
             count += 1;
         }
     }
@@ -493,20 +602,39 @@ fn write_attachment(
     output_dir: &Path,
     used_names: &mut HashSet<String>,
     prefix: &str,
+    filter: &AttachmentFilter,
+    verbose: bool,
 ) -> bool {
-    let bytes = match data {
-        Some(AttachmentData::Binary(bv)) => bv.buffer(),
-        _ => return false,
-    };
-    if bytes.is_empty() {
-        return false;
-    }
-
     let raw_name = props
         .get(PR_ATTACH_LONG_FILENAME)
         .and_then(prop_to_string)
         .or_else(|| props.get(PR_ATTACH_FILENAME).and_then(prop_to_string))
         .unwrap_or_else(|| "attachment.bin".to_string());
+
+    if verbose {
+        eprintln!("processing attachment {}", raw_name);
+    }
+
+    if !filter.allows_name(&raw_name) {
+        if verbose {
+            eprintln!("skipping attachment {} (filtered)", raw_name);
+        }
+        return false;
+    }
+
+    let bytes = match data {
+        Some(AttachmentData::Binary(bv)) => bv.buffer(),
+        Some(AttachmentData::Message(_)) => {
+            if verbose {
+                eprintln!("skipping attachment {} (embedded message export not implemented)", raw_name);
+            }
+            return false;
+        }
+        _ => return false,
+    };
+    if bytes.is_empty() {
+        return false;
+    }
 
     let lower = raw_name.to_lowercase();
 
@@ -515,7 +643,7 @@ fn write_attachment(
     }
 
     if lower.ends_with(".emz") {
-        return write_emz_attachment(bytes, &raw_name, output_dir, used_names, prefix);
+        return write_emz_attachment(bytes, &raw_name, output_dir, used_names, prefix, verbose);
     }
 
     let prefixed_name = format!("{}{}", prefix, raw_name);
@@ -578,7 +706,12 @@ fn write_emz_attachment(
     output_dir: &Path,
     used_names: &mut HashSet<String>,
     prefix: &str,
+    verbose: bool,
 ) -> bool {
+    if verbose {
+        eprintln!("decompressing emz {}", raw_name);
+    }
+
     let stem = std::path::Path::new(raw_name)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -586,6 +719,9 @@ fn write_emz_attachment(
 
     // ── 0: raw OLE-wrapped EMF (no compression) ──────────────────────────────
     if let Some(emf_data) = strip_emf_wrapper(bytes) {
+        if verbose {
+            eprintln!("unwrapping ole object in {}", raw_name);
+        }
         let name = unique_filename(&format!("{}{}.emf", prefix, stem), used_names);
         if std::fs::write(output_dir.join(&name), emf_data).is_ok() {
             return true;

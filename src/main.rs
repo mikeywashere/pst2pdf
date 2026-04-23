@@ -22,6 +22,8 @@ Examples:\n\
   pst2pdf --pst archive.pst\n\
   pst2pdf --pst archive.pst --as text\n\
   pst2pdf --pst archive.pst --as pdf,text\n\
+  pst2pdf --pst archive.pst --verbose\n\
+  pst2pdf --pst archive.pst --filter png,eml,txt,msg\n\
   pst2pdf --pst archive.pst --conversations --output ./out --as text\n\
   pst2pdf --pst archive.pst --attachments ./attachments")]
 #[command(arg_required_else_help = true)]
@@ -54,6 +56,15 @@ struct Args {
     /// Examples: --as pdf  --as text  --as pdf,text
     #[arg(long = "as", value_name = "FORMAT", value_delimiter = ',', default_value = "pdf")]
     output_format: Vec<String>,
+
+    /// Emit detailed progress logs while reading messages and writing attachments.
+    #[arg(long)]
+    verbose: bool,
+
+    /// Filter attachment extensions. Use positive values to include only those
+    /// extensions, or negative values to exclude them.
+    #[arg(long, value_name = "EXT", value_delimiter = ',', allow_hyphen_values = true)]
+    filter: Vec<String>,
 }
 
 fn main() -> Result<()> {
@@ -66,6 +77,7 @@ fn main() -> Result<()> {
         eprintln!("error: --as accepts 'pdf' and/or 'text' (e.g. --as pdf,text)");
         std::process::exit(1);
     }
+    let attachment_filter = pst_reader::AttachmentFilter::from_specs(&args.filter);
 
     // Derive the stem (base filename without extension) from the PST file.
     let pst_stem = args.pst
@@ -82,11 +94,11 @@ fn main() -> Result<()> {
         .unwrap_or_else(|| PathBuf::from("."));
 
     println!("Reading PST: {}", args.pst.display());
-    let messages = pst_reader::read_messages(&args.pst)
+    let messages = pst_reader::read_messages(&args.pst, args.verbose)
         .with_context(|| format!("Failed to read {}", args.pst.display()))?;
 
     println!("Found {} messages", messages.len());
-    let threads = thread_grouper::group_by_thread(messages);
+    let threads = thread_grouper::group_by_thread(messages, args.verbose);
     println!("Grouped into {} conversation threads", threads.len());
 
     if args.conversations {
@@ -106,7 +118,14 @@ fn main() -> Result<()> {
 
         if let Some(att_dir) = &args.attachments {
             println!("Extracting attachments to: {}", att_dir.display());
-            let count = pst_reader::save_attachments_for_threads(&args.pst, att_dir, &threads, &pst_stem)
+            let count = pst_reader::save_attachments_for_threads(
+                &args.pst,
+                att_dir,
+                &threads,
+                &pst_stem,
+                &attachment_filter,
+                args.verbose,
+            )
                 .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
             println!("Saved {} attachment(s).", count);
         }
@@ -144,7 +163,7 @@ fn main() -> Result<()> {
 
         if let Some(att_dir) = &args.attachments {
             println!("Extracting attachments to: {}", att_dir.display());
-            let count = pst_reader::save_attachments(&args.pst, att_dir)
+            let count = pst_reader::save_attachments(&args.pst, att_dir, &attachment_filter, args.verbose)
                 .with_context(|| format!("Failed to extract attachments to {}", att_dir.display()))?;
             println!("Saved {} attachment(s).", count);
         }

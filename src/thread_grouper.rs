@@ -19,12 +19,19 @@ pub fn normalize_subject(subject: &str) -> String {
     s.to_lowercase()
 }
 
-pub fn group_by_thread(messages: Vec<EmailMessage>) -> Vec<ConversationThread> {
+pub fn group_by_thread(messages: Vec<EmailMessage>, verbose: bool) -> Vec<ConversationThread> {
     let mut thread_map: HashMap<String, (String, Vec<EmailMessage>)> = HashMap::new();
 
     for msg in messages {
         let key = msg.normalized_subject.clone();
         let display = msg.subject.clone();
+        if verbose {
+            if thread_map.contains_key(&key) {
+                eprintln!("reading reply to {}, {}", msg.node_id, display);
+            } else {
+                eprintln!("reading message {}, {}", msg.node_id, display);
+            }
+        }
         let entry = thread_map
             .entry(key)
             .or_insert_with(|| (display, Vec::new()));
@@ -120,14 +127,14 @@ mod tests {
 
     #[test]
     fn group_empty_input() {
-        let threads = group_by_thread(vec![]);
+        let threads = group_by_thread(vec![], false);
         assert!(threads.is_empty());
     }
 
     #[test]
     fn group_single_message() {
         let msgs = vec![make_msg("Hello", Some(0))];
-        let threads = group_by_thread(msgs);
+        let threads = group_by_thread(msgs, false);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].messages.len(), 1);
     }
@@ -138,7 +145,7 @@ mod tests {
             make_msg("Hello", Some(0)),
             make_msg("Re: Hello", Some(1)),
         ];
-        let threads = group_by_thread(msgs);
+        let threads = group_by_thread(msgs, false);
         assert_eq!(threads.len(), 1);
         assert_eq!(threads[0].messages.len(), 2);
     }
@@ -149,7 +156,7 @@ mod tests {
             make_msg("Alpha", Some(0)),
             make_msg("Beta", Some(1)),
         ];
-        let threads = group_by_thread(msgs);
+        let threads = group_by_thread(msgs, false);
         assert_eq!(threads.len(), 2);
     }
 
@@ -160,7 +167,7 @@ mod tests {
             make_msg("Re: Hello", Some(50)),
             make_msg("Re: Hello", Some(200)),
         ];
-        let threads = group_by_thread(msgs);
+        let threads = group_by_thread(msgs, false);
         assert_eq!(threads.len(), 1);
         let dates: Vec<i64> = threads[0]
             .messages
@@ -177,7 +184,7 @@ mod tests {
             make_msg("Apple", Some(0)),
             make_msg("Mango", Some(0)),
         ];
-        let threads = group_by_thread(msgs);
+        let threads = group_by_thread(msgs, false);
         let subjects: Vec<&str> = threads.iter().map(|t| t.display_subject.as_str()).collect();
         assert_eq!(subjects, vec!["Apple", "Mango", "Zebra"]);
     }
