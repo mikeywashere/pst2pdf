@@ -8,6 +8,11 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Parser;
 
+fn is_dir_like(path: &PathBuf) -> bool {
+    let s = path.to_string_lossy();
+    path.is_dir() || s.ends_with('\\') || s.ends_with('/')
+}
+
 #[derive(Parser)]
 #[command(name = "pst2pdf")]
 #[command(about = "Convert an Outlook PST archive to PDF and/or text")]
@@ -108,7 +113,7 @@ fn main() -> Result<()> {
     } else {
         // Resolve base output path (without extension).
         let base_path = match args.output {
-            Some(ref p) if p.is_dir() => p.join(&pst_stem),
+            Some(ref p) if is_dir_like(p) => p.join(&pst_stem),
             Some(ref p) => p
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
