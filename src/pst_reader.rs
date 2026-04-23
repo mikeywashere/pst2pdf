@@ -563,12 +563,15 @@ const MAX_EML_BYTES: u64 = 50 * 1024 * 1024;
 ///
 /// Large content is streamed directly to disk to avoid OOM. The fallback
 /// chain is:
+///   0. raw OLE-wrapped EMF (no compression) → strip wrapper → save .emf
 ///   1. zip → .eml found, small  → PDF
 ///   2. zip → .eml found, large  → stream raw .eml to disk
 ///   3. gzip → EML heuristic, small → PDF
 ///   4. gzip → EML heuristic, large → stream decompressed .eml to disk
-///   5. gzip → non-EML content   → stream decompressed file to disk
-///   6. everything failed        → save original .emz bytes
+///   5. gzip → OLE-wrapped EMF, small → strip wrapper → save .emf
+///   6. gzip → OLE-wrapped EMF, large → stream decompressed .emf to disk
+///   7. gzip → other content → save/stream decompressed to disk
+///   8. everything failed → save original .emz bytes
 fn write_emz_attachment(
     bytes: &[u8],
     raw_name: &str,
@@ -580,6 +583,14 @@ fn write_emz_attachment(
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or(raw_name);
+
+    // ── 0: raw OLE-wrapped EMF (no compression) ──────────────────────────────
+    if let Some(emf_data) = strip_emf_wrapper(bytes) {
+        let name = unique_filename(&format!("{}{}.emf", prefix, stem), used_names);
+        if std::fs::write(output_dir.join(&name), emf_data).is_ok() {
+            return true;
+        }
+    }
 
     // ── 1 & 2: zip path ──────────────────────────────────────────────────────
     if zip_has_eml(bytes) {
@@ -633,10 +644,35 @@ fn write_emz_attachment(
                 }
             }
         } else {
-            // Not EML – stream whatever was decompressed to disk.
-            let name = unique_filename(&format!("{}{}", prefix, raw_name), used_names);
-            if gunzip_to_file(bytes, &output_dir.join(&name)) {
-                return true;
+            // Not EML – try bounded decompression to check for EMF wrapper.
+            if let Some(decompressed) = try_gunzip_limited(bytes) {
+                if let Some(emf_data) = strip_emf_wrapper(&decompressed) {
+                    let name = unique_filename(&format!("{}{}.emf", prefix, stem), used_names);
+                    if std::fs::write(output_dir.join(&name), emf_data).is_ok() {
+                        return true;
+                    }
+                }
+                // Not EMF either – save decompressed bytes with original stem name.
+                let name = unique_filename(&format!("{}{}", prefix, raw_name), used_names);
+                if std::fs::write(output_dir.join(&name), &decompressed).is_ok() {
+                    return true;
+                }
+            } else {
+                // Too large for RAM – detect EMF from prefix, stream to disk with
+                // an appropriate extension.
+                let is_emf = gunzip_prefix(bytes)
+                    .as_deref()
+                    .and_then(strip_emf_wrapper)
+                    .is_some();
+                let dest_name = if is_emf {
+                    format!("{}{}.emf", prefix, stem)
+                } else {
+                    format!("{}{}", prefix, raw_name)
+                };
+                let name = unique_filename(&dest_name, used_names);
+                if gunzip_to_file(bytes, &output_dir.join(&name)) {
+                    return true;
+                }
             }
         }
     }
@@ -770,6 +806,29 @@ fn eml_is_plain_text(part: &eml_codec::part::AnyPart<'_>) -> bool {
     } else {
         false
     }
+}
+
+/// Detects and strips the 32-byte Outlook/OLE EMF wrapper.
+/// Returns `Some(&[u8])` containing the raw EMF stream if detected,
+/// or `None` if the data is not a wrapped EMF.
+fn strip_emf_wrapper(data: &[u8]) -> Option<&[u8]> {
+    const WRAPPER_LEN: usize = 32;
+    if data.len() < WRAPPER_LEN + 8 {
+        return None;
+    }
+    if &data[WRAPPER_LEN..WRAPPER_LEN + 4] != b"EMF\0" {
+        return None;
+    }
+    let record_type = u32::from_le_bytes([
+        data[WRAPPER_LEN + 4],
+        data[WRAPPER_LEN + 5],
+        data[WRAPPER_LEN + 6],
+        data[WRAPPER_LEN + 7],
+    ]);
+    if record_type != 1 {
+        return None;
+    }
+    Some(&data[WRAPPER_LEN..])
 }
 
 /// Returns true if the bytes start with the gzip magic number.
