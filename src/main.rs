@@ -82,11 +82,12 @@ struct Args {
     verbose: bool,
 
     /// Filter attachment extensions. Use positive values to include only those
-    /// extensions, or negative values to exclude them.
+    /// extensions, or negative values to exclude them. Requires --attachments.
     #[arg(long, value_name = "EXT", value_delimiter = ',', allow_hyphen_values = true)]
     filter: Vec<String>,
 
     /// Recursively unpack compressed attachments into subfolders while keeping the originals.
+    /// Requires --attachments.
     #[arg(long)]
     unzip: bool,
 }
@@ -129,6 +130,17 @@ fn main() -> Result<()> {
     } else if !want_pdf && !want_text {
         eprintln!("error: --as accepts 'pdf' and/or 'text' (e.g. --as pdf,text)");
         std::process::exit(1);
+    }
+    // Validate that attachment-specific flags require --attachments
+    if args.attachments.is_none() {
+        if !args.filter.is_empty() {
+            eprintln!("error: --filter requires --attachments");
+            std::process::exit(1);
+        }
+        if args.unzip {
+            eprintln!("error: --unzip requires --attachments");
+            std::process::exit(1);
+        }
     }
     let attachment_filter = pst_reader::AttachmentFilter::from_specs(&args.filter);
     let by_conversation = matches!(args.by, OutputBy::Conversation);
