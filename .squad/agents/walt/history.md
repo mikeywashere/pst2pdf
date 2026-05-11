@@ -31,3 +31,14 @@ PST files store messages in multiple folders. `std::unordered_set<std::string>` 
 
 **CMake for research libraries:**  
 pstsdk has no CMake package config. Pattern: `find_path(PSTSDK_INCLUDE_DIR NAMES pstsdk/pst.h HINTS ${PSTSDK_ROOT}/include ...)` with a `FATAL_ERROR` and helpful message if not found. Expose `PSTSDK_ROOT` and `LIBHARU_ROOT` as cache variables for override.
+
+### 2026-05-09 — Snapshot release automation
+
+**Snapshot releases from `main`:**  
+GitHub Actions now publishes prereleases on every push to `main` and stable releases on `v*` tags. The workflow derives a SemVer-compatible release version from `Cargo.toml` plus GitHub run metadata, then rewrites the checkout with `cargo-v` so the built binary version stays aligned.
+
+**Published artifacts:**  
+Each release ships a Linux `.tar.gz`, a Windows `.zip`, a CycloneDX SBOM, and a provenance manifest built from release-asset checksums.
+
+**Release versioning pattern:**  
+`clap` now uses the package version for `--version`, so the CLI version, archive names, and GitHub release tag stay in sync whenever practical.

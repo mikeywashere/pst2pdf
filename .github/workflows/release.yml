@@ -1,28 +1,59 @@
-name: Release (Rust Multi‑Platform)
+name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
 permissions:
   contents: write
-  id-token: write
 
 env:
   APP_NAME: pst2pdf
 
 jobs:
-  build:
-    name: Build & Package
+  metadata:
+    name: Derive release version
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      release_name: ${{ steps.release.outputs.release_name }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-          - target: x86_64-pc-windows-gnu
-          - target: x86_64-apple-darwin
+      - name: Compute version
+        id: release
+        shell: bash
+        run: |
+          base_version=$(python - <<'PY'
+from pathlib import Path
+import tomllib
+print(tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"])
+PY
+)
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            prerelease=false
+          else
+            version="${base_version}-snapshot.${GITHUB_RUN_NUMBER}.${GITHUB_SHA::7}"
+            prerelease=true
+          fi
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=v${version}" >> "${GITHUB_OUTPUT}"
+          echo "release_name=pst2pdf ${version}" >> "${GITHUB_OUTPUT}"
+          echo "prerelease=${prerelease}" >> "${GITHUB_OUTPUT}"
+
+  build-linux:
+    name: Build Linux release
+    needs: metadata
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -30,39 +61,78 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
 
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+      - name: Install cargo-v
+        run: cargo install cargo-v --locked
 
-      - name: Build with cross
-        run: cross build --release --target ${{ matrix.target }}
-
-      - name: Prepare dist
-        run: |
-          mkdir -p dist/${{ matrix.target }}
-          cp target/${{ matrix.target }}/release/${APP_NAME}* dist/${{ matrix.target }}/
-
-      - name: Package archives
-        run: |
-          cd dist/${{ matrix.target }}
-          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
-            zip ../${APP_NAME}-${{ matrix.target }}.zip *
-          else
-            tar -czf ../${APP_NAME}-${{ matrix.target }}.tar.gz *
-          fi
+      - name: Set release version
         shell: bash
+        run: cargo v "${{ needs.metadata.outputs.version }}" -y
 
-      - name: Upload build artifacts
+      - name: Build binary
+        run: cargo build --release --locked
+
+      - name: Package archive
+        id: package
+        shell: bash
+        run: |
+          dist="dist/linux"
+          mkdir -p "${dist}"
+          cp "target/release/${APP_NAME}" "${dist}/"
+          archive="dist/${APP_NAME}-${{ needs.metadata.outputs.version }}-linux-x86_64.tar.gz"
+          tar -C "${dist}" -czf "${archive}" "${APP_NAME}"
+          echo "archive=${archive}" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.target }}
-          path: dist/${APP_NAME}-${{ matrix.target }}.*
+          name: linux-archive
+          path: ${{ steps.package.outputs.archive }}
 
-  sbom_slsa:
-    name: SBOM + SLSA
-    needs: build
+  build-windows:
+    name: Build Windows release
+    needs: metadata
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-v
+        shell: pwsh
+        run: cargo install cargo-v --locked
+
+      - name: Set release version
+        shell: pwsh
+        run: cargo v "${{ needs.metadata.outputs.version }}" -y
+
+      - name: Build binary
+        shell: pwsh
+        run: cargo build --release --locked
+
+      - name: Package archive
+        id: package
+        shell: pwsh
+        run: |
+          $dist = "dist\windows"
+          New-Item -ItemType Directory -Force -Path $dist | Out-Null
+          Copy-Item "target\release\$env:APP_NAME.exe" $dist
+          $archive = "dist\$env:APP_NAME-${{ needs.metadata.outputs.version }}-windows-x86_64.zip"
+          Compress-Archive -Path "$dist\$env:APP_NAME.exe" -DestinationPath $archive -Force
+          "archive=$archive" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Upload archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-archive
+          path: ${{ steps.package.outputs.archive }}
+
+  sbom:
+    name: Generate SBOM
+    needs: metadata
     runs-on: ubuntu-latest
 
     steps:
@@ -72,77 +142,109 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install cargo-v
+        run: cargo install cargo-v --locked
+
+      - name: Set release version
+        shell: bash
+        run: cargo v "${{ needs.metadata.outputs.version }}" -y
+
       - name: Install CycloneDX generator
-        run: cargo install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --locked
 
       - name: Generate SBOM
-        run: cargo cyclonedx --output-format json --output sbom.json
+        shell: bash
+        run: |
+          mkdir -p dist
+          cargo cyclonedx --output-format json --output "dist/sbom-${{ needs.metadata.outputs.version }}.json"
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
           name: sbom
-          path: sbom.json
+          path: dist/sbom-${{ needs.metadata.outputs.version }}.json
 
-      - name: Generate SLSA provenance
-        uses: slsa-framework/slsa-github-generator/actions/generator@v2
+  provenance:
+    name: Generate provenance
+    needs: [metadata, build-linux, build-windows, sbom]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download release artifacts
+        uses: actions/download-artifact@v4
         with:
-          artifact_path: .
-          output_path: provenance.json
+          path: release-assets
+
+      - name: Create provenance manifest
+        shell: bash
+        run: |
+          python - <<'PY'
+from hashlib import sha256
+from pathlib import Path
+import json
+import os
+
+root = Path("release-assets")
+artifacts = []
+
+for path in sorted(root.rglob("*")):
+    if not path.is_file():
+        continue
+    data = path.read_bytes()
+    artifacts.append({
+        "path": str(path.relative_to(root)).replace("\\", "/"),
+        "sha256": sha256(data).hexdigest(),
+        "size": path.stat().st_size,
+    })
+
+manifest = {
+    "schema": "pst2pdf.release-provenance/v1",
+    "repository": os.environ["GITHUB_REPOSITORY"],
+    "workflow": os.environ["GITHUB_WORKFLOW"],
+    "run_id": os.environ["GITHUB_RUN_ID"],
+    "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+    "ref": os.environ["GITHUB_REF"],
+    "sha": os.environ["GITHUB_SHA"],
+    "version": os.environ["VERSION"],
+    "release_tag": os.environ["RELEASE_TAG"],
+    "prerelease": os.environ["PRERELEASE"],
+    "artifacts": artifacts,
+}
+
+out = Path("dist")
+out.mkdir(parents=True, exist_ok=True)
+target = out / f"provenance-{os.environ['VERSION']}.json"
+target.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+PY
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+          RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
+          PRERELEASE: ${{ needs.metadata.outputs.prerelease }}
 
       - name: Upload provenance
         uses: actions/upload-artifact@v4
         with:
           name: provenance
-          path: provenance.json
+          path: dist/provenance-${{ needs.metadata.outputs.version }}.json
 
   release:
-    name: Create GitHub Release
-    needs: [build, sbom_slsa]
+    name: Publish release
+    needs: [metadata, build-linux, build-windows, sbom, provenance]
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download all artifacts
+      - name: Download release assets
         uses: actions/download-artifact@v4
         with:
           path: release-assets
 
-      - name: Create GitHub Release
+      - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.metadata.outputs.release_tag }}
+          name: ${{ needs.metadata.outputs.release_name }}
+          prerelease: ${{ needs.metadata.outputs.prerelease == 'true' }}
+          make_latest: ${{ needs.metadata.outputs.prerelease != 'true' }}
           files: release-assets/**/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  package_managers:
-    name: Homebrew + Winget + Cargo‑dist
-    needs: release
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # -------------------------
-      # Homebrew (stub)
-      # -------------------------
-      - name: Update Homebrew formula
-        run: |
-          echo "TODO: Update your Homebrew tap repo here"
-          echo "Example: bump version + URLs in homebrew-tap/pst2pdf.rb"
-
-      # -------------------------
-      # Winget (stub)
-      # -------------------------
-      - name: Update Winget manifest
-        run: |
-          echo "TODO: Generate Winget YAML and submit PR to winget-pkgs"
-
-      # -------------------------
-      # Cargo-dist (stub)
-      # -------------------------
-      - name: Cargo-dist integration
-        run: |
-          echo "TODO: If using cargo-dist, run cargo dist build here"
-          # cargo install cargo-dist
-          # cargo dist build --target ...

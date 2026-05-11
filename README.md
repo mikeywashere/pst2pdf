@@ -24,6 +24,8 @@ cargo build --release
 
 The binary will be at `target\release\pst2pdf.exe`.
 
+The CLI also supports `--version`, which is kept in sync with the release tag.
+
 ## Usage
 
 ```
@@ -44,6 +46,11 @@ pst2pdf --pst <FILE> [OPTIONS]
 | `--unzip` | Recursively unpack compressed attachments into subfolders while keeping the original archive |
 
 Running with no arguments prints help.
+
+## Releases
+
+Pushes to `main` publish snapshot releases. Git tags that start with `v` publish stable releases.
+Each release includes a Windows zip, a Linux tar.gz, an SBOM, and a provenance manifest.
 
 ## Examples
 

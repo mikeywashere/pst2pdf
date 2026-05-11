@@ -30,6 +30,7 @@ fn sort_flat_messages(
 
 #[derive(Parser)]
 #[command(name = "pst2pdf")]
+#[command(version)]
 #[command(about = "Convert an Outlook PST archive to PDF and/or text")]
 #[command(long_about = "Convert an Outlook PST archive to PDF and/or plain-text files.\n\
 \n\
