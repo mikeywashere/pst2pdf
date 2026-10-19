@@ -141,7 +141,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cargo cyclonedx --output-format json --output "dist/sbom-${{ needs.metadata.outputs.version }}.json"
+          cargo cyclonedx --format json --override-filename sbom
+          mv sbom.json "dist/sbom-${{ needs.metadata.outputs.version }}.json"
 
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
