@@ -30,12 +30,7 @@ jobs:
         id: release
         shell: bash
         run: |
-          base_version=$(python - <<'PY'
-from pathlib import Path
-import tomllib
-print(tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"])
-PY
-)
+          base_version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             version="${GITHUB_REF_NAME#v}"
@@ -62,15 +57,12 @@ PY
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-v
-        run: cargo install cargo-v --locked
-
       - name: Set release version
         shell: bash
-        run: cargo v "${{ needs.metadata.outputs.version }}" -y
+        run: sed -i '0,/^version = ".*"/s//version = "${{ needs.metadata.outputs.version }}"/' Cargo.toml
 
       - name: Build binary
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Package archive
         id: package
@@ -101,17 +93,13 @@ PY
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-v
-        shell: pwsh
-        run: cargo install cargo-v --locked
-
       - name: Set release version
-        shell: pwsh
-        run: cargo v "${{ needs.metadata.outputs.version }}" -y
+        shell: bash
+        run: sed -i '0,/^version = ".*"/s//version = "${{ needs.metadata.outputs.version }}"/' Cargo.toml
 
       - name: Build binary
         shell: pwsh
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Package archive
         id: package
@@ -142,12 +130,9 @@ PY
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install cargo-v
-        run: cargo install cargo-v --locked
-
       - name: Set release version
         shell: bash
-        run: cargo v "${{ needs.metadata.outputs.version }}" -y
+        run: sed -i '0,/^version = ".*"/s//version = "${{ needs.metadata.outputs.version }}"/' Cargo.toml
 
       - name: Install CycloneDX generator
         run: cargo install cargo-cyclonedx --locked
@@ -170,6 +155,9 @@ PY
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Download release artifacts
         uses: actions/download-artifact@v4
         with:
@@ -178,44 +166,7 @@ PY
       - name: Create provenance manifest
         shell: bash
         run: |
-          python - <<'PY'
-from hashlib import sha256
-from pathlib import Path
-import json
-import os
-
-root = Path("release-assets")
-artifacts = []
-
-for path in sorted(root.rglob("*")):
-    if not path.is_file():
-        continue
-    data = path.read_bytes()
-    artifacts.append({
-        "path": str(path.relative_to(root)).replace("\\", "/"),
-        "sha256": sha256(data).hexdigest(),
-        "size": path.stat().st_size,
-    })
-
-manifest = {
-    "schema": "pst2pdf.release-provenance/v1",
-    "repository": os.environ["GITHUB_REPOSITORY"],
-    "workflow": os.environ["GITHUB_WORKFLOW"],
-    "run_id": os.environ["GITHUB_RUN_ID"],
-    "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-    "ref": os.environ["GITHUB_REF"],
-    "sha": os.environ["GITHUB_SHA"],
-    "version": os.environ["VERSION"],
-    "release_tag": os.environ["RELEASE_TAG"],
-    "prerelease": os.environ["PRERELEASE"],
-    "artifacts": artifacts,
-}
-
-out = Path("dist")
-out.mkdir(parents=True, exist_ok=True)
-target = out / f"provenance-{os.environ['VERSION']}.json"
-target.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-PY
+          python .github/scripts/provenance.py
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
           RELEASE_TAG: ${{ needs.metadata.outputs.release_tag }}
