@@ -21,7 +21,8 @@
 
 ## Project Context
 
-- **Project:** pst2pdf — C++ command-line tool to convert Outlook PST email archives to PDF, with each conversation thread rendered as a section.
+- **Project:** pst2pdf — Rust command-line tool to convert Outlook PST email archives to PDF, with each conversation thread rendered as a section.
 - **Owner:** Michael R. Schmidt
-- **Stack:** C++, pstsdk, libHaru, CMake
+- **Stack:** Rust, outlook-pst (vendored), printpdf, clap, Cargo
+- **Releases:** Pushing to `main` publishes a snapshot pre-release; pushing a `v*` tag publishes a stable release (Windows zip, Linux tar.gz, SBOM, provenance) via `.github/workflows/release.yml`.
 - **Created:** 2026-04-14
